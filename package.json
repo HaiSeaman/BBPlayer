@@ -1,0 +1,87 @@
+{
+  "name": "bb-player",
+  "version": "1.0.0",
+  "description": "极简无边框高性能本地视频播放器",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win"
+  },
+  "keywords": [
+    "player",
+    "video",
+    "electron"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^34.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.bb.player",
+    "productName": "BBPlayer",
+    "directories": {
+      "output": "release-dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "index.html",
+      "package.json",
+      "build/**/*"
+    ],
+    "fileAssociations": [
+      {
+        "ext": [
+          "mp4",
+          "mkv",
+          "avi",
+          "mov",
+          "wmv",
+          "flv",
+          "webm",
+          "m4v",
+          "ts",
+          "rmvb",
+          "rm",
+          "3gp",
+          "mpg",
+          "mpeg",
+          "m2ts",
+          "vob",
+          "ogv",
+          "f4v",
+          "m2v"
+        ],
+        "name": "Video File",
+        "role": "Viewer"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "BB视频播放器"
+    }
+  }
+}

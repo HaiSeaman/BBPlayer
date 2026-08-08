@@ -1,0 +1,2 @@
+[permissions]
+allow = ["Bash=cd \"D:\\AI\\Github\\BB\\BB\" && for id in $(grep -oP \"getElementById\\('\\K[^']+\" renderer.js | sort -u); do if ! grep -q \"id=\\\"$id\\\"\" index.html; then echo \"MISSING: $id\"; fi; done; echo \"---ID CHECK DONE---\" && grep -c \"id=\\\"\" index.html", "Edit"]
