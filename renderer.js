@@ -19,6 +19,31 @@ if (window.electronAPI) {
       }
     });
   }
+
+  // 窗口最小化自动暂停与恢复
+  let wasPlayingBeforeMinimize = false;
+  if (typeof window.electronAPI.onWindowMinimized === 'function') {
+    window.electronAPI.onWindowMinimized(() => {
+      if (video && !video.paused && isVideoLoaded) {
+        wasPlayingBeforeMinimize = true;
+        video.pause();
+        updatePlayPauseUI(false);
+        showToast('窗口已最小化，自动暂停播放');
+      }
+    });
+  }
+  if (typeof window.electronAPI.onWindowRestored === 'function') {
+    window.electronAPI.onWindowRestored(() => {
+      if (wasPlayingBeforeMinimize) {
+        if (video && isVideoLoaded) {
+          video.play().then(() => {
+            updatePlayPauseUI(true);
+          }).catch(console.error);
+        }
+        wasPlayingBeforeMinimize = false;
+      }
+    });
+  }
 }
 const titleBar = document.getElementById('titlebar');
 const video = document.getElementById('main-video');
@@ -794,19 +819,84 @@ function togglePlayPause() {
 
 if (playPauseBtn) playPauseBtn.addEventListener('click', togglePlayPause);
 
-// 单击画面播放/暂停（延迟 250ms 以区分双击全屏）
+// 完美兼顾画面按住拖拽窗口与单击播放/暂停
 if (video) {
-  video.addEventListener('click', (e) => {
-    e.stopPropagation();
+  let isDraggingWindow = false;
+  let startX = 0;
+  let startY = 0;
+  let initialWinX = 0;
+  let initialWinY = 0;
+
+  video.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return; // 仅左键响应
+    if (document.fullscreenElement) return; // 全屏状态下禁止拖动窗口
+
     if (clickTimer) {
       clearTimeout(clickTimer);
       clickTimer = null;
     }
-    clickTimer = setTimeout(() => {
-      clickTimer = null;
-      togglePlayPause();
-    }, 250);
-    showControls(); // 单击同时唤出控制栏（不依赖冒泡，避免被 stopPropagation 阻断）
+    isDraggingWindow = false;
+    startX = e.screenX;
+    startY = e.screenY;
+
+    // 记录拖拽初始瞬间的屏幕与窗口坐标
+    if (window.electronAPI && typeof window.electronAPI.moveWindow === 'function') {
+      initialWinX = window.screenX;
+      initialWinY = window.screenY;
+    }
+
+    const onPointerMove = (moveEv) => {
+      const deltaX = moveEv.screenX - startX;
+      const deltaY = moveEv.screenY - startY;
+
+      // 位移阈值判断（超过 4px 视作拖动窗口，而不是单击）
+      if (!isDraggingWindow && (Math.abs(deltaX) > 4 || Math.abs(deltaY) > 4)) {
+        isDraggingWindow = true;
+        if (clickTimer) {
+          clearTimeout(clickTimer);
+          clickTimer = null;
+        }
+      }
+
+      if (isDraggingWindow && window.electronAPI && typeof window.electronAPI.moveWindow === 'function') {
+        window.electronAPI.moveWindow({
+          x: initialWinX + deltaX,
+          y: initialWinY + deltaY
+        });
+      }
+    };
+
+    const cleanupPointerListeners = () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerCancel);
+    };
+
+    const onPointerUp = (upEv) => {
+      cleanupPointerListeners();
+
+      if (!isDraggingWindow) {
+        // 说明是纯粹的左键单击，触发播放/暂停
+        if (clickTimer) {
+          clearTimeout(clickTimer);
+          clickTimer = null;
+        }
+        clickTimer = setTimeout(() => {
+          clickTimer = null;
+          togglePlayPause();
+        }, 250);
+        showControls();
+      }
+    };
+
+    const onPointerCancel = () => {
+      cleanupPointerListeners();
+      isDraggingWindow = false;
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerCancel);
   });
 }
 
@@ -842,11 +932,19 @@ video.addEventListener('timeupdate', () => {
   renderSubtitlesAt(current);
 });
 
-// 新视频加载完成时重置进度显示（避免残留上一视频的进度）
+// 新视频加载完成时重置进度显示（避免残留上一视频的进度）并触发窗口适应视频比例
 video.addEventListener('loadedmetadata', () => {
   if (progressFill) progressFill.style.width = '0%';
   if (currentTimeEl) currentTimeEl.textContent = formatTime(0);
   if (durationEl) durationEl.textContent = formatTime(video.duration);
+
+  // 通知主进程调整窗口尺寸及固定宽高比，彻底消除上下左右黑边
+  if (video.videoWidth && video.videoHeight && window.electronAPI && typeof window.electronAPI.resizeToVideo === 'function') {
+    window.electronAPI.resizeToVideo({
+      width: video.videoWidth,
+      height: video.videoHeight
+    });
+  }
 });
 
 // 视频加载失败提示（损坏文件 / 不支持的格式）
@@ -1334,13 +1432,13 @@ function updatePlayModeUI(mode, showNotification = true) {
     if (iconState) {
       if (mode === 'list-loop') {
         iconState.innerHTML = `<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>`;
-        playModeBtn.title = '当前模式：全部视频循环播放';
+        playModeBtn.title = '当前模式：循环播放';
       } else if (mode === 'random') {
         iconState.innerHTML = `<polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/>`;
-        playModeBtn.title = '当前模式：全部视频随机播放';
+        playModeBtn.title = '当前模式：随机播放';
       } else if (mode === 'single-loop') {
         iconState.innerHTML = `<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/><text x="12" y="15" font-size="8" font-weight="bold" fill="currentColor" text-anchor="middle">1</text>`;
-        playModeBtn.title = '当前模式：单个视频循环播放';
+        playModeBtn.title = '当前模式：单个循环';
       }
     }
   }
@@ -1353,9 +1451,9 @@ function updatePlayModeUI(mode, showNotification = true) {
 
   if (showNotification) {
     const nameMap = {
-      'list-loop': '列表循环播放',
+      'list-loop': '循环播放',
       'random': '随机播放',
-      'single-loop': '单视频循环'
+      'single-loop': '单个循环'
     };
     showToast(`播放模式已切换：${nameMap[mode] || mode}`);
   }

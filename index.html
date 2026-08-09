@@ -45,6 +45,7 @@
       justify-content: center;
       align-items: center;
       overflow: hidden;
+      -webkit-app-region: no-drag;
     }
 
     #player-container.drag-over::after {
@@ -84,7 +85,7 @@
       transform: translateX(-50%) translateY(4px);
     }
 
-    /* 视频播放核心 - 支持比例拉伸 */
+    /* 视频播放核心 - 支持比例拉伸与无边框贴合 */
     #main-video {
       width: 100%;
       height: 100%;
@@ -132,6 +133,11 @@
       pointer-events: auto;
       text-align: center;
       padding: 40px;
+      -webkit-app-region: drag;
+    }
+
+    #empty-state .empty-actions {
+      -webkit-app-region: no-drag;
     }
 
     #empty-state .brand-logo-container {
@@ -324,11 +330,11 @@
       width: calc(100% - 48px);
       max-width: 900px;
       padding: 14px 20px;
-      background: var(--panel-glass);
+      background: transparent;
       backdrop-filter: blur(24px) saturate(180%);
-      border: 1px solid var(--panel-border);
+      border: 1px solid rgba(255, 255, 255, 0.2);
       border-radius: 20px;
-      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.15);
       display: flex;
       flex-direction: column;
       gap: 12px;
@@ -336,6 +342,7 @@
       opacity: 1;
       pointer-events: auto;
       transition: opacity 0.35s cubic-bezier(0.16, 1, 0.3, 1), transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+      -webkit-app-region: no-drag;
     }
 
     #controls-overlay.hide {
@@ -423,9 +430,9 @@
     }
 
     .ctrl-btn {
-      background: none;
-      border: none;
-      color: var(--text-secondary);
+      background: rgba(255, 255, 255, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: #ffffff;
       font-size: 14px;
       font-weight: 500;
       cursor: pointer;
@@ -435,8 +442,10 @@
       width: 32px;
       height: 32px;
       border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
       transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
       padding: 0;
+      -webkit-app-region: no-drag;
     }
 
     .ctrl-btn svg {
@@ -450,9 +459,11 @@
     }
 
     .ctrl-btn:hover {
-      color: var(--text-primary);
-      background: rgba(255, 255, 255, 0.08);
-      transform: scale(1.05);
+      background: rgba(255, 255, 255, 0.25);
+      border-color: rgba(255, 255, 255, 0.35);
+      color: #ffffff;
+      box-shadow: 0 4px 12px rgba(0, 242, 254, 0.3);
+      transform: translateY(-1px) scale(1.04);
     }
 
     .ctrl-btn.active {
@@ -470,7 +481,8 @@
 
     .time-display {
       font-size: 12px;
-      color: var(--text-secondary);
+      color: var(--text-primary);
+      font-weight: 500;
       font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
       margin-left: 4px;
       letter-spacing: 0.5px;
@@ -569,6 +581,7 @@
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6), 0 0 20px var(--accent-glow);
       backdrop-filter: blur(20px);
       animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      -webkit-app-region: no-drag;
     }
 
     @keyframes slideIn {
@@ -856,9 +869,9 @@
               </svg>
             </button>
             <div class="popover-menu" id="play-mode-menu">
-              <div class="menu-item" data-mode="list-loop">全部视频循环</div>
-              <div class="menu-item" data-mode="random">全部视频随机</div>
-              <div class="menu-item" data-mode="single-loop">单个视频循环</div>
+              <div class="menu-item" data-mode="list-loop">循环播放</div>
+              <div class="menu-item" data-mode="random">随机播放</div>
+              <div class="menu-item" data-mode="single-loop">单个循环</div>
             </div>
           </div>
 

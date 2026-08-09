@@ -44,5 +44,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
       console.warn('webUtils.getPathForFile 提取路径失败:', err);
     }
     return file ? (file.path || '') : '';
+  },
+
+  // 动态调整窗口适应视频尺寸比例
+  resizeToVideo: (videoSize) => ipcRenderer.invoke('resize-window-to-video', videoSize),
+
+  // 发送动态窗口拖拽请求
+  moveWindow: (pos) => ipcRenderer.send('window-move', pos),
+
+  // 监听窗口最小化与恢复
+  onWindowMinimized: (callback) => {
+    ipcRenderer.on('window-minimized', () => callback());
+  },
+  onWindowRestored: (callback) => {
+    ipcRenderer.on('window-restored', () => callback());
   }
 });

@@ -135,6 +135,19 @@ function createWindow() {
     mainWindow.show();
   });
 
+  // 监听窗口最小化与恢复事件
+  mainWindow.on('minimize', () => {
+    if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('window-minimized');
+    }
+  });
+
+  mainWindow.on('restore', () => {
+    if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send('window-restored');
+    }
+  });
+
   // 窗口大小/位置变化时保存状态（防抖，全屏时不记录）
   let stateSaveTimer = null;
   const scheduleStateSave = () => {
@@ -331,4 +344,56 @@ ipcMain.handle('dialog:saveScreenshot', async (event, payload) => {
     }
   }
   return false;
+});
+
+// 监听渲染进程发来的视频分辨率，动态调整窗口大小与锁定宽高比（消除黑边）
+ipcMain.handle('resize-window-to-video', (event, payload) => {
+  if (!payload || typeof payload !== 'object') return false;
+  const { width, height } = payload;
+  if (!mainWindow || !width || !height) return false;
+
+  // 0, 0 表示重置取消宽高比锁定
+  if (width === 0 || height === 0) {
+    mainWindow.setAspectRatio(0);
+    return true;
+  }
+
+  const aspectRatio = width / height;
+  mainWindow.setAspectRatio(aspectRatio);
+
+  // 如果窗口处于全屏或最大化状态，不改变尺寸
+  if (mainWindow.isFullScreen() || mainWindow.isMaximized()) {
+    return true;
+  }
+
+  // 支持多显示器环境：获取窗口当前所在的显示器
+  const currentBounds = mainWindow.getBounds();
+  const currentDisplay = screen.getDisplayMatching(currentBounds);
+  const { workArea } = currentDisplay;
+
+  let targetWidth = Math.min(width, Math.round(workArea.width * 0.85));
+  let targetHeight = Math.round(targetWidth / aspectRatio);
+
+  if (targetHeight > workArea.height * 0.85) {
+    targetHeight = Math.round(workArea.height * 0.85);
+    targetWidth = Math.round(targetHeight * aspectRatio);
+  }
+
+  // 保持窗口比例的前提下确保不小于最小宽 480 像素
+  const minWidth = 480;
+  if (targetWidth < minWidth) {
+    targetWidth = minWidth;
+    targetHeight = Math.round(targetWidth / aspectRatio);
+  }
+
+  mainWindow.setSize(targetWidth, targetHeight);
+  return true;
+});
+
+// 处理渲染进程发送的动态移动窗口请求
+ipcMain.on('window-move', (event, payload) => {
+  if (!payload || typeof payload !== 'object') return;
+  const { x, y } = payload;
+  if (!mainWindow || typeof x !== 'number' || typeof y !== 'number') return;
+  mainWindow.setPosition(Math.round(x), Math.round(y));
 });
