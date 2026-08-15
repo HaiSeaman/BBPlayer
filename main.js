@@ -130,6 +130,10 @@ function createWindow() {
 
   mainWindow.loadFile('index.html');
 
+  // 安全防护：禁止页面打开新窗口与跳转外部导航
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (e) => e.preventDefault());
+
   // 优雅加载
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
@@ -168,6 +172,29 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+
+  // 关闭前强制保存窗口状态（防抖计时可能未触发，避免丢失最后一次移动/缩放）
+  mainWindow.on('close', () => {
+    if (mainWindow && !mainWindow.isFullScreen()) {
+      try {
+        fs.writeFileSync(windowStateFile, JSON.stringify(mainWindow.getBounds()), 'utf8');
+      } catch (e) {
+        // 忽略写入失败
+      }
+    }
+  });
+}
+
+// === IPC 安全防护：仅接受主窗口顶层渲染进程的调用 ===
+function isTrustedSender(event) {
+  return !!(
+    mainWindow &&
+    mainWindow.webContents &&
+    !mainWindow.webContents.isDestroyed() &&
+    event &&
+    event.senderFrame &&
+    event.senderFrame === mainWindow.webContents.mainFrame
+  );
 }
 
 // 软件准备就绪
@@ -184,11 +211,13 @@ app.on('window-all-closed', () => {
 });
 
 // === IPC 原生窗口交互处理 ===
-ipcMain.on('window-minimize', () => {
+ipcMain.on('window-minimize', (event) => {
+  if (!isTrustedSender(event)) return;
   if (mainWindow) mainWindow.minimize();
 });
 
-ipcMain.on('window-maximize', () => {
+ipcMain.on('window-maximize', (event) => {
+  if (!isTrustedSender(event)) return;
   if (mainWindow) {
     if (mainWindow.isMaximized()) {
       mainWindow.unmaximize();
@@ -198,47 +227,51 @@ ipcMain.on('window-maximize', () => {
   }
 });
 
-ipcMain.on('window-close', () => {
+ipcMain.on('window-close', (event) => {
+  if (!isTrustedSender(event)) return;
   if (mainWindow) mainWindow.close();
 });
 
 // 真正的全屏切换（区别于窗口最大化）
-ipcMain.on('window-fullscreen', () => {
+ipcMain.on('window-fullscreen', (event) => {
+  if (!isTrustedSender(event)) return;
   if (mainWindow) mainWindow.setFullScreen(!mainWindow.isFullScreen());
 });
 
 // 查询当前是否处于全屏状态（供 Esc 退出全屏）
-ipcMain.handle('window:isFullScreen', () => {
+ipcMain.handle('window:isFullScreen', (event) => {
+  if (!isTrustedSender(event)) return false;
   return mainWindow ? mainWindow.isFullScreen() : false;
 });
 
 // 获取应用冷启动时传入的文件路径
-ipcMain.handle('app:getInitialFile', () => {
+ipcMain.handle('app:getInitialFile', (event) => {
+  if (!isTrustedSender(event)) return null;
   const filePath = initialFilePath;
   initialFilePath = null;
   return filePath;
 });
 
-// 打开本地视频文件对话框
-ipcMain.handle('dialog:openFile', async () => {
-  if (!mainWindow) return null;
+// 打开本地视频文件对话框（支持多选）
+ipcMain.handle('dialog:openFile', async (event) => {
+  if (!mainWindow || !isTrustedSender(event)) return null;
   const result = await dialog.showOpenDialog(mainWindow, {
     title: '选择本地视频文件',
-    properties: ['openFile'],
+    properties: ['openFile', 'multiSelections'],
     filters: [
       { name: '视频文件', extensions: ['mp4', 'mkv', 'avi', 'mov', 'flv', 'wmv', 'webm', 'm4v', 'ts', 'rmvb', 'rm', '3gp', 'mpg', 'mpeg', 'm2ts', 'vob', 'ogv', 'f4v', 'm2v'] },
       { name: '所有文件', extensions: ['*'] }
     ]
   });
   if (!result.canceled && result.filePaths.length > 0) {
-    return result.filePaths[0];
+    return result.filePaths;
   }
   return null;
 });
 
 // 打开本地字幕文件对话框
-ipcMain.handle('dialog:openSubtitle', async () => {
-  if (!mainWindow) return null;
+ipcMain.handle('dialog:openSubtitle', async (event) => {
+  if (!mainWindow || !isTrustedSender(event)) return null;
   const result = await dialog.showOpenDialog(mainWindow, {
     title: '选择外挂字幕文件',
     properties: ['openFile'],
@@ -284,8 +317,8 @@ async function scanDirectorySafe(dirPath, currentDepth = 0, maxDepth = 3, maxFil
   return collected;
 }
 
-ipcMain.handle('dialog:openFolder', async () => {
-  if (!mainWindow) return [];
+ipcMain.handle('dialog:openFolder', async (event) => {
+  if (!mainWindow || !isTrustedSender(event)) return [];
   const result = await dialog.showOpenDialog(mainWindow, {
     title: '选择视频文件夹',
     properties: ['openDirectory']
@@ -305,6 +338,7 @@ ipcMain.handle('dialog:openFolder', async () => {
 const ALLOWED_SUBTITLE_EXTS = new Set(['.srt', '.vtt', '.ass', '.ssa', '.sub', '.lrc', '.txt']);
 
 ipcMain.handle('file:readText', async (event, filePath) => {
+  if (!isTrustedSender(event)) return null;
   if (typeof filePath !== 'string' || !filePath) return null;
   const ext = path.extname(filePath).toLowerCase();
   if (!ALLOWED_SUBTITLE_EXTS.has(ext)) {
@@ -319,14 +353,19 @@ ipcMain.handle('file:readText', async (event, filePath) => {
   }
 });
 
-// 导出保存高清截图到本地文件
+// 导出保存高清截图到本地文件（支持 ArrayBuffer 与 dataURL 两种载荷）
 ipcMain.handle('dialog:saveScreenshot', async (event, payload) => {
-  if (!mainWindow) return false;
-  // 兼容直接传 dataUrl 参数或传对象参数
-  const dataUrl = typeof payload === 'string' ? payload : (payload ? payload.dataUrl : '');
-  const defaultName = (typeof payload === 'object' && payload) ? payload.defaultName : '';
-  if (!dataUrl) return false;
-  
+  if (!mainWindow || !isTrustedSender(event)) return false;
+  // 兼容直接传 dataUrl 字符串、旧格式 { dataUrl } 或新格式 { data }（ArrayBuffer）
+  let data = null;
+  if (typeof payload === 'string') {
+    data = payload;
+  } else if (payload && typeof payload === 'object') {
+    data = payload.data !== undefined ? payload.data : payload.dataUrl;
+  }
+  const defaultName = (payload && typeof payload === 'object') ? payload.defaultName : '';
+  if (!data) return false;
+
   const result = await dialog.showSaveDialog(mainWindow, {
     title: '保存视频画面截图',
     defaultPath: defaultName || 'BBPlayer_Screenshot.png',
@@ -335,8 +374,15 @@ ipcMain.handle('dialog:saveScreenshot', async (event, payload) => {
 
   if (!result.canceled && result.filePath) {
     try {
-      const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-      await fs.promises.writeFile(result.filePath, base64Data, 'base64');
+      if (data instanceof ArrayBuffer) {
+        // 新格式：二进制直写，避免大图 base64 膨胀与解码开销
+        await fs.promises.writeFile(result.filePath, Buffer.from(data));
+      } else if (typeof data === 'string' && data.startsWith('data:image/png;base64,')) {
+        await fs.promises.writeFile(result.filePath, data.replace(/^data:image\/png;base64,/, ''), 'base64');
+      } else {
+        console.warn('保存截图失败：不支持的载荷格式');
+        return false;
+      }
       return true;
     } catch (err) {
       console.error('保存截图失败:', err);
@@ -348,9 +394,10 @@ ipcMain.handle('dialog:saveScreenshot', async (event, payload) => {
 
 // 监听渲染进程发来的视频分辨率，动态调整窗口大小与锁定宽高比（消除黑边）
 ipcMain.handle('resize-window-to-video', (event, payload) => {
+  if (!isTrustedSender(event)) return false;
   if (!payload || typeof payload !== 'object') return false;
   const { width, height } = payload;
-  if (!mainWindow || !width || !height) return false;
+  if (!mainWindow || typeof width !== 'number' || typeof height !== 'number' || !isFinite(width) || !isFinite(height)) return false;
 
   // 0, 0 表示重置取消宽高比锁定
   if (width === 0 || height === 0) {
@@ -390,10 +437,21 @@ ipcMain.handle('resize-window-to-video', (event, payload) => {
   return true;
 });
 
-// 处理渲染进程发送的动态移动窗口请求
+// 处理渲染进程发送的动态移动窗口请求（约束在全部显示器并集内，避免拖出屏幕无法找回）
 ipcMain.on('window-move', (event, payload) => {
+  if (!isTrustedSender(event)) return;
   if (!payload || typeof payload !== 'object') return;
   const { x, y } = payload;
   if (!mainWindow || typeof x !== 'number' || typeof y !== 'number') return;
-  mainWindow.setPosition(Math.round(x), Math.round(y));
+
+  const bounds = mainWindow.getBounds();
+  const displays = screen.getAllDisplays().map(d => d.workArea);
+  const left = Math.min(...displays.map(d => d.x));
+  const top = Math.min(...displays.map(d => d.y));
+  const right = Math.max(...displays.map(d => d.x + d.width));
+  const bottom = Math.max(...displays.map(d => d.y + d.height));
+  // 允许跨屏自由拖动，但窗口至少保留 40px 可抓取区域在所有屏幕并集内
+  const nx = Math.min(Math.max(x, left - bounds.width + 40), right - 40);
+  const ny = Math.min(Math.max(y, top), bottom - 40);
+  mainWindow.setPosition(Math.round(nx), Math.round(ny));
 });

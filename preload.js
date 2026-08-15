@@ -1,4 +1,5 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
+const { pathToFileURL } = require('url');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // 窗口控制
@@ -23,8 +24,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 读取本地文本文件（字幕，主进程已做扩展名白名单）
   readTextFile: (filePath) => ipcRenderer.invoke('file:readText', filePath),
 
-  // 保存图片截图到本地
-  saveScreenshot: (dataUrl, defaultName) => ipcRenderer.invoke('dialog:saveScreenshot', { dataUrl, defaultName }),
+  // 保存图片截图到本地（支持 ArrayBuffer / dataURL 两种载荷）
+  saveScreenshot: (data, defaultName) => ipcRenderer.invoke('dialog:saveScreenshot', { data, defaultName }),
 
   // 获取启动时双击/命令行传入的视频文件路径
   getInitialFile: () => ipcRenderer.invoke('app:getInitialFile'),
@@ -44,6 +45,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
       console.warn('webUtils.getPathForFile 提取路径失败:', err);
     }
     return file ? (file.path || '') : '';
+  },
+
+  // 本地路径转 file:// URL（标准 percent 编码，正确处理空格/中文/#/?/%/UNC 等特殊路径）
+  toFileUrl: (p) => {
+    try {
+      if (typeof p !== 'string' || !p) return '';
+      return pathToFileURL(p).href;
+    } catch (err) {
+      console.warn('toFileUrl 转换失败:', err);
+      return '';
+    }
   },
 
   // 动态调整窗口适应视频尺寸比例
