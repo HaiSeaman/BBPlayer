@@ -13,7 +13,7 @@
     "electron"
   ],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "devDependencies": {
     "electron": "^34.2.0",
     "electron-builder": "^25.1.8"
@@ -29,6 +29,7 @@
       "preload.js",
       "renderer.js",
       "index.html",
+      "shared-video-exts.js",
       "package.json",
       "build/**/*"
     ],

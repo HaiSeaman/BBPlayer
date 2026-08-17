@@ -5,7 +5,7 @@
 ![Electron](https://img.shields.io/badge/Electron-34.x-47848F?style=for-the-badge&logo=electron&logoColor=white)
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Cross--Platform-0078D6?style=for-the-badge&logo=windows&logoColor=white)
-![License](https://img.shields.io/badge/License-ISC-blue.svg?style=for-the-badge)
+![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
 
 **纯粹、轻量、高颜值的无边框现代桌面视频播放器**
 
@@ -87,6 +87,7 @@
 BBPlayer/
 ├── main.js             # Electron 主进程 (窗口管理、IPC 路由、原生 AspectRatio 锁定)
 ├── preload.js          # 上下文隔离桥接 (ContextIsolation, 暴露安全受限的 window.electronAPI)
+├── shared-video-exts.js# 视频扩展名单一来源 (主进程过滤器与渲染进程拖拽判断共用)
 ├── index.html          # 视图模板 (极简语义化结构、CSP 安全策略、毛玻璃 CSS 架构)
 ├── renderer.js         # 渲染进程核心控制器 (手势拖拽位移算法、字幕匹配引擎、播放状态机)
 ├── build/              # 应用图标与静态构建资源
@@ -164,4 +165,4 @@ npm run build
 
 ## 📄 开源许可证
 
-本项目基于 [ISC License](./package.json) 开放源代码。
+本项目基于 [MIT License](./LICENSE) 开放源代码。

@@ -8,7 +8,6 @@
     :root {
       --bg-obsidian: #08090c;
       --panel-glass: rgba(14, 17, 23, 0.75);
-      --panel-glass-hover: rgba(22, 27, 36, 0.85);
       --panel-border: rgba(255, 255, 255, 0.08);
       --panel-border-glow: rgba(0, 242, 254, 0.25);
       --accent-neon: #00f2fe;
@@ -108,7 +107,6 @@
     #custom-subtitle-text {
       display: inline-block;
       background: rgba(8, 9, 12, 0.82);
-      backdrop-filter: blur(12px);
       color: #ffffff;
       padding: 8px 20px;
       border-radius: 10px;
@@ -330,8 +328,7 @@
       width: calc(100% - 48px);
       max-width: 900px;
       padding: 14px 20px;
-      background: transparent;
-      backdrop-filter: blur(24px) saturate(180%);
+      background: var(--panel-glass);
       border: 1px solid rgba(255, 255, 255, 0.2);
       border-radius: 20px;
       box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.15);
@@ -861,7 +858,7 @@
           <!-- 播放模式控制菜单 -->
           <div class="menu-popover-container">
             <button class="ctrl-btn" id="btn-play-mode" title="播放模式">
-              <svg viewBox="0 0 24 24" id="icon-play-mode-state">
+              <svg viewBox="0 0 24 24">
                 <g id="icon-playmode-state">
                   <!-- 默认全部循环模式图标 -->
                   <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
@@ -935,7 +932,7 @@
 
           <!-- 全屏切换 -->
           <button class="ctrl-btn" id="btn-fullscreen" title="全屏 (F11)">
-            <svg viewBox="0 0 24 24" id="icon-fullscreen-state"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+            <svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
           </button>
 
           <!-- 播放列表切换按钮 -->

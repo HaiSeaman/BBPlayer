@@ -1,50 +1,41 @@
+// 本软件仅运行于 Electron，preload 未注入即属致命错误
+if (!window.electronAPI) throw new Error('BBPlayer 必须在 Electron 环境中运行');
+
 // === 监听外部/命令行双击打开的文件 ===
-if (window.electronAPI) {
-  // 检查冷启动传入的文件路径
-  if (typeof window.electronAPI.getInitialFile === 'function') {
-    window.electronAPI.getInitialFile().then(filePath => {
-      if (filePath) {
-        addFilesToPlaylist([filePath]);
-      }
-    }).catch(err => {
-      console.error('获取冷启动文件失败:', err);
-    });
+window.electronAPI.getInitialFile().then(filePath => {
+  if (filePath) {
+    addFilesToPlaylist([filePath]);
   }
+}).catch(err => {
+  console.error('获取冷启动文件失败:', err);
+});
 
-  // 监听运行中双击打开文件事件
-  if (typeof window.electronAPI.onOpenFile === 'function') {
-    window.electronAPI.onOpenFile((filePath) => {
-      if (filePath) {
-        addFilesToPlaylist([filePath]);
-      }
-    });
+window.electronAPI.onOpenFile((filePath) => {
+  if (filePath) {
+    addFilesToPlaylist([filePath]);
   }
+});
 
-  // 窗口最小化自动暂停与恢复
-  let wasPlayingBeforeMinimize = false;
-  if (typeof window.electronAPI.onWindowMinimized === 'function') {
-    window.electronAPI.onWindowMinimized(() => {
-      if (video && !video.paused && isVideoLoaded) {
-        wasPlayingBeforeMinimize = true;
-        video.pause();
-        updatePlayPauseUI(false);
-        showToast('窗口已最小化，自动暂停播放');
-      }
-    });
+// 窗口最小化自动暂停与恢复
+let wasPlayingBeforeMinimize = false;
+window.electronAPI.onWindowMinimized(() => {
+  if (video && !video.paused && isVideoLoaded) {
+    wasPlayingBeforeMinimize = true;
+    video.pause();
+    updatePlayPauseUI(false);
+    showToast('窗口已最小化，自动暂停播放');
   }
-  if (typeof window.electronAPI.onWindowRestored === 'function') {
-    window.electronAPI.onWindowRestored(() => {
-      if (wasPlayingBeforeMinimize) {
-        if (video && isVideoLoaded) {
-          video.play().then(() => {
-            updatePlayPauseUI(true);
-          }).catch(console.error);
-        }
-        wasPlayingBeforeMinimize = false;
-      }
-    });
+});
+window.electronAPI.onWindowRestored(() => {
+  if (wasPlayingBeforeMinimize) {
+    if (video && isVideoLoaded) {
+      video.play().then(() => {
+        updatePlayPauseUI(true);
+      }).catch(console.error);
+    }
+    wasPlayingBeforeMinimize = false;
   }
-}
+});
 const titleBar = document.getElementById('titlebar');
 const video = document.getElementById('main-video');
 const videoContainer = document.getElementById('player-container');
@@ -107,7 +98,7 @@ const historyViewBtn = document.getElementById('btn-history-view');
 const addFolderBtn = document.getElementById('btn-add-folder');
 
 // === 全局播放列表状态 ===
-let playlist = []; // 存储 { file, name, path, key }
+let playlist = []; // 存储 { target, name, key }
 let currentPlaylistIndex = -1;
 let playlistView = 'list'; // 'list' | 'history'
 
@@ -153,7 +144,7 @@ function showToast(message) {
   }, 2500);
 }
 
-// === 播放历史存取（兼容旧版纯数字格式，限制条数） ===
+// === 播放历史存取（限制条数） ===
 function loadHistory() {
   try {
     const raw = JSON.parse(localStorage.getItem(HISTORY_KEY) || '{}');
@@ -161,8 +152,6 @@ function loadHistory() {
     for (const [key, val] of Object.entries(raw)) {
       if (val && typeof val === 'object' && typeof val.t === 'number') {
         out[key] = val;
-      } else if (typeof val === 'number') {
-        out[key] = { t: val, ts: 0 }; // 兼容旧格式 { path: seconds }
       }
     }
     return out;
@@ -200,23 +189,13 @@ function persistSettings() {
   }
 }
 
-// 高频场景（音量滑块拖动/滚轮调音）节流持久化，避免连续写 localStorage
-let settingsSaveTimer = null;
-function persistSettingsDebounced() {
-  if (settingsSaveTimer) clearTimeout(settingsSaveTimer);
-  settingsSaveTimer = setTimeout(() => {
-    settingsSaveTimer = null;
-    persistSettings();
-  }, 300);
-}
-
 (function restoreSettings() {
   try {
     const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     if (typeof s.volume === 'number') video.volume = Math.max(0, Math.min(1, s.volume));
     if (typeof s.speed === 'number') currentSpeed = s.speed;
     if (typeof s.subtitleOffset === 'number') subtitleOffset = Math.max(-60, Math.min(60, s.subtitleOffset));
-    if (typeof s.subtitleFontSize === 'number') currentSubtitleFontSize = s.subtitleFontSize;
+    if (typeof s.subtitleFontSize === 'number') currentSubtitleFontSize = Math.max(12, Math.min(48, s.subtitleFontSize));
     if (typeof s.subtitleVisible === 'boolean') isSubtitleVisible = s.subtitleVisible;
     if (s.playMode && ['list-loop', 'random', 'single-loop'].includes(s.playMode)) {
       playMode = s.playMode;
@@ -239,17 +218,6 @@ function persistSettingsDebounced() {
   }
 })();
 
-// 本地文件路径转 file:// URL（优先主进程标准转换，正确处理空格/中文/#/?/% 等特殊字符）
-function toFileUrl(p) {
-  if (window.electronAPI && typeof window.electronAPI.toFileUrl === 'function') {
-    const url = window.electronAPI.toFileUrl(p);
-    if (url) return url;
-  }
-  // 回退（纯浏览器调试场景）：逐段百分号编码，保留盘符冒号
-  const normalized = String(p).replace(/\\/g, '/');
-  return 'file:///' + normalized.split('/').map((seg, i) => (i === 0 ? seg : encodeURIComponent(seg))).join('/');
-}
-
 // 全局保存创出的 Blob URL，方便垃圾回收释放
 let currentBlobUrl = null;
 
@@ -261,6 +229,9 @@ function revokeCurrentBlobUrl() {
 }
 
 let autoNextTimer = null;
+
+// 连续播放失败计数（成功加载元数据时清零）；达到列表总数说明全部无法播放，停止自动跳转
+let consecutivePlayErrors = 0;
 
 function clearAutoNextTimer() {
   if (autoNextTimer) {
@@ -282,22 +253,16 @@ function loadAndPlayVideo(filePathOrFile) {
     fullPath = filePathOrFile;
     fileName = filePathOrFile.split(/[\\/]/).pop();
     hasRealPath = true;
-    targetSrc = toFileUrl(fullPath);
+    targetSrc = window.electronAPI.toFileUrl(fullPath);
   } else if (filePathOrFile instanceof File) {
     fileName = filePathOrFile.name;
-    // 优先尝试从原生 API 提取物理路径
-    let extractedPath = '';
-    if (window.electronAPI && typeof window.electronAPI.getFilePath === 'function') {
-      extractedPath = window.electronAPI.getFilePath(filePathOrFile);
-    }
-    if (!extractedPath) {
-      extractedPath = filePathOrFile.path || '';
-    }
+    // 从原生 API 提取物理路径（失败时返回空串，走 Blob 播放）
+    const extractedPath = window.electronAPI.getFilePath(filePathOrFile);
 
     if (extractedPath) {
       fullPath = extractedPath;
       hasRealPath = true;
-      targetSrc = toFileUrl(extractedPath);
+      targetSrc = window.electronAPI.toFileUrl(extractedPath);
     } else {
       // 降级双保险：URL.createObjectURL(file) 内存直接播放（无物理路径，不记历史）
       revokeCurrentBlobUrl();
@@ -329,7 +294,6 @@ function loadAndPlayVideo(filePathOrFile) {
   if (resumeToast) resumeToast.style.display = 'none';
 
   video.src = targetSrc;
-  video.load();
 
   // 保留并应用当前的倍速设置
   video.playbackRate = currentSpeed;
@@ -356,19 +320,26 @@ function loadAndPlayVideo(filePathOrFile) {
 
   // 检查播放历史记忆（仅真实路径）
   // 等元数据就绪后再判断，确保"接近完结"过滤使用真实 duration；
-  // 带令牌校验，避免旧视频的续播检查误应用到新视频
+  // 带令牌校验，避免旧视频的续播检查误应用到新视频；加载失败时也要清理，防止监听器累积
   if (hasRealPath) {
     const resumeToken = fullPath;
-    video.addEventListener('loadedmetadata', () => {
+    const cleanup = () => {
+      video.removeEventListener('loadedmetadata', onMeta);
+      video.removeEventListener('error', onError);
+    };
+    const onMeta = () => {
+      cleanup();
       if (currentFilePath === resumeToken) checkHistoryResume(resumeToken);
-    }, { once: true });
+    };
+    const onError = () => cleanup();
+    video.addEventListener('loadedmetadata', onMeta);
+    video.addEventListener('error', onError);
   }
 }
 
 // 通过主进程读取字幕文件（避免 fetch file:// 的路径编码与 CORS 问题）
 async function loadSubtitleFromPath(filePath, expectedVideoPath) {
   if (!filePath) return false;
-  if (!window.electronAPI || typeof window.electronAPI.readTextFile !== 'function') return false;
   try {
     const text = await window.electronAPI.readTextFile(filePath);
     if (text) {
@@ -418,10 +389,14 @@ function checkHistoryResume(pathKey) {
   }
 }
 
-// 自动打卡记录播放进度
+// 自动打卡记录播放进度（暂停或进度未变时跳过，避免无谓的解析/排序/写盘）
+let lastSavedProgressSec = -1;
 function saveCurrentProgress() {
   if (!currentFilePath || !hasRealPath) return;
-  if (!video.duration || video.currentTime < 3) return;
+  if (video.paused || !video.duration || video.currentTime < 3) return;
+  const sec = Math.floor(video.currentTime);
+  if (sec === lastSavedProgressSec) return;
+  lastSavedProgressSec = sec;
   saveHistoryEntry(currentFilePath, video.currentTime);
 }
 
@@ -432,27 +407,27 @@ setInterval(saveCurrentProgress, 5000);
 if (openFileBtn) {
   openFileBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (window.electronAPI && window.electronAPI.openFileDialog) {
-      window.electronAPI.openFileDialog().then(files => {
-        if (files && files.length > 0) {
-          addFilesToPlaylist(files);
-        }
-      }).catch(err => {
-        console.error('打开文件对话框失败:', err);
-      });
-    }
+    window.electronAPI.openFileDialog().then(files => {
+      if (files && files.length > 0) {
+        addFilesToPlaylist(files);
+      }
+    }).catch(err => {
+      console.error('打开文件对话框失败:', err);
+    });
   });
 }
 
 // === 打开整个文件夹，把其中视频全部加入播放列表 ===
 async function openFolderAndAdd() {
-  if (!window.electronAPI || typeof window.electronAPI.openFolderDialog !== 'function') return;
   try {
     const files = await window.electronAPI.openFolderDialog();
-    if (files && files.length > 0) {
-      const added = addFilesToPlaylist(files);
-      if (added > 0) showToast(`已添加文件夹中的 ${added} 个视频`);
+    if (files === null) return; // 用户取消选择
+    if (files.length === 0) {
+      showToast('所选文件夹中没有视频文件');
+      return;
     }
+    const added = addFilesToPlaylist(files);
+    if (added > 0) showToast(`已添加文件夹中的 ${added} 个视频`);
   } catch (err) {
     console.error('打开文件夹失败:', err);
   }
@@ -496,10 +471,8 @@ window.addEventListener('drop', (e) => {
   const files = e.dataTransfer ? Array.from(e.dataTransfer.files) : [];
   if (files.length === 0) return;
 
-  const videoExtensions = [
-    'mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv', 'm4v', 'ts',
-    'rmvb', 'rm', '3gp', 'mpg', 'mpeg', 'm2ts', 'vob', 'ogv', 'f4v', 'm2v'
-  ];
+  // 视频扩展名与主进程共享同一份列表（preload 注入）
+  const videoExtensions = window.electronAPI.videoExtensions;
   const videoFiles = files.filter(f => {
     // 过滤掉非视频扩展名以及大小为0或类似文件夹的非法条目
     if (!f.name || f.size === 0 || (f.type === '' && !f.name.includes('.'))) return false;
@@ -509,7 +482,7 @@ window.addEventListener('drop', (e) => {
 
   const subtitleFiles = files.filter(f => {
     const ext = f.name.split('.').pop().toLowerCase();
-    return ['srt', 'vtt', 'ass'].includes(ext);
+    return ['srt', 'vtt', 'ass', 'ssa'].includes(ext);
   });
 
   // 处理拖入的字幕
@@ -541,10 +514,7 @@ function addFilesToPlaylist(fileList) {
       key = fileOrPath; // 用完整路径去重，同名不同路径不再误判
     } else if (fileOrPath instanceof File) {
       name = fileOrPath.name;
-      const p = (window.electronAPI && typeof window.electronAPI.getFilePath === 'function')
-        ? window.electronAPI.getFilePath(fileOrPath)
-        : (fileOrPath.path || '');
-      key = p || name;
+      key = window.electronAPI.getFilePath(fileOrPath) || name;
     }
     if (!key) return;
     // 防止重复添加（按唯一 key）
@@ -696,6 +666,22 @@ if (historyViewBtn) {
   });
 }
 
+// 将播放器重置为空状态（播放列表由调用方清空）
+function resetPlayerToEmpty() {
+  currentPlaylistIndex = -1;
+  hasRealPath = false;
+  currentFilePath = '';
+  currentSubtitleData = [];
+  pendingResumeTime = 0;
+  revokeCurrentBlobUrl();
+  if (customSubtitle) customSubtitle.style.display = 'none';
+  if (resumeToast) resumeToast.style.display = 'none';
+  video.src = '';
+  video.load();
+  if (emptyState) emptyState.style.display = 'flex';
+  isVideoLoaded = false;
+}
+
 // 清空播放列表（历史视图下则清空观看历史）
 if (playlistClearBtn) {
   playlistClearBtn.addEventListener('click', (e) => {
@@ -711,29 +697,36 @@ if (playlistClearBtn) {
       return;
     }
     playlist = [];
-    currentPlaylistIndex = -1;
-    hasRealPath = false;
-    currentFilePath = '';
-    currentSubtitleData = [];
-    pendingResumeTime = 0;
-    revokeCurrentBlobUrl();
-    if (customSubtitle) customSubtitle.style.display = 'none';
-    if (resumeToast) resumeToast.style.display = 'none';
-    video.src = '';
-    video.load();
-    if (emptyState) emptyState.style.display = 'flex';
-    isVideoLoaded = false;
+    resetPlayerToEmpty();
     if (playlistView !== 'list') togglePlaylistView(); // 切回列表视图让清空结果可见
     renderPlaylist();
     showToast('播放列表已清空');
   });
 }
 
+// 随机选一个不同于当前的播放索引（列表仅 1 项时只能重播自己）
+function randomIndexExcluding(excludeIdx) {
+  if (playlist.length === 1) return 0;
+  const pool = [];
+  for (let i = 0; i < playlist.length; i++) {
+    if (i !== excludeIdx) pool.push(i);
+  }
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
 function playPlaylistItem(index) {
   clearAutoNextTimer();
   if (index < 0 || index >= playlist.length) return;
+  const prevIndex = currentPlaylistIndex;
   currentPlaylistIndex = index;
-  renderPlaylist();
+  // 列表 DOM 与数据同步时仅移动高亮条目，避免整列表重建（不同步则退回全量渲染）
+  const items = playlistItemsContainer ? playlistItemsContainer.children : [];
+  if (playlistView === 'list' && items.length === playlist.length) {
+    if (prevIndex >= 0 && items[prevIndex]) items[prevIndex].classList.remove('active');
+    if (items[index]) items[index].classList.add('active');
+  } else {
+    renderPlaylist();
+  }
   loadAndPlayVideo(playlist[index].target);
 }
 
@@ -745,18 +738,7 @@ function removePlaylistItem(index) {
       const nextIndex = index < playlist.length ? index : playlist.length - 1;
       playPlaylistItem(nextIndex);
     } else {
-      currentPlaylistIndex = -1;
-      hasRealPath = false;
-      currentFilePath = '';
-      currentSubtitleData = [];
-      pendingResumeTime = 0;
-      revokeCurrentBlobUrl();
-      if (customSubtitle) customSubtitle.style.display = 'none';
-      if (resumeToast) resumeToast.style.display = 'none';
-      video.src = '';
-      video.load();
-      if (emptyState) emptyState.style.display = 'flex';
-      isVideoLoaded = false;
+      resetPlayerToEmpty();
     }
   } else if (currentPlaylistIndex > index) {
     currentPlaylistIndex--;
@@ -779,16 +761,7 @@ if (video) {
       let nextIndex = -1;
 
       if (playMode === 'random') {
-        if (playlist.length === 1) {
-          nextIndex = 0;
-        } else {
-          // 随机选择一个不同于当前的索引
-          const pool = [];
-          for (let i = 0; i < playlist.length; i++) {
-            if (i !== currentPlaylistIndex) pool.push(i);
-          }
-          nextIndex = pool[Math.floor(Math.random() * pool.length)];
-        }
+        nextIndex = randomIndexExcluding(currentPlaylistIndex);
         showToast('即将随机播放下一个视频');
       } else {
         // 'list-loop' 全部循环
@@ -811,11 +784,7 @@ if (prevBtn) {
     e.stopPropagation();
     if (playlist.length === 0) return;
     if (playMode === 'random' && playlist.length > 1) {
-      const pool = [];
-      for (let i = 0; i < playlist.length; i++) {
-        if (i !== currentPlaylistIndex) pool.push(i);
-      }
-      playPlaylistItem(pool[Math.floor(Math.random() * pool.length)]);
+      playPlaylistItem(randomIndexExcluding(currentPlaylistIndex));
     } else {
       const next = currentPlaylistIndex <= 0 ? playlist.length - 1 : currentPlaylistIndex - 1;
       playPlaylistItem(next);
@@ -828,11 +797,7 @@ if (nextBtn) {
     e.stopPropagation();
     if (playlist.length === 0) return;
     if (playMode === 'random' && playlist.length > 1) {
-      const pool = [];
-      for (let i = 0; i < playlist.length; i++) {
-        if (i !== currentPlaylistIndex) pool.push(i);
-      }
-      playPlaylistItem(pool[Math.floor(Math.random() * pool.length)]);
+      playPlaylistItem(randomIndexExcluding(currentPlaylistIndex));
     } else {
       const next = currentPlaylistIndex >= playlist.length - 1 ? 0 : currentPlaylistIndex + 1;
       playPlaylistItem(next);
@@ -907,10 +872,8 @@ if (video) {
     startY = e.screenY;
 
     // 记录拖拽初始瞬间的屏幕与窗口坐标
-    if (window.electronAPI && typeof window.electronAPI.moveWindow === 'function') {
-      initialWinX = window.screenX;
-      initialWinY = window.screenY;
-    }
+    initialWinX = window.screenX;
+    initialWinY = window.screenY;
 
     const onPointerMove = (moveEv) => {
       const deltaX = moveEv.screenX - startX;
@@ -925,7 +888,7 @@ if (video) {
         }
       }
 
-      if (isDraggingWindow && window.electronAPI && typeof window.electronAPI.moveWindow === 'function') {
+      if (isDraggingWindow) {
         window.electronAPI.moveWindow({
           x: initialWinX + deltaX,
           y: initialWinY + deltaY
@@ -967,20 +930,21 @@ if (video) {
   });
 }
 
-// === 点击任意非菜单区域关闭菜单 ===
-document.addEventListener('click', () => {
-  if (speedMenu) speedMenu.classList.remove('show');
-  if (subtitleMenu) subtitleMenu.classList.remove('show');
-  if (aspectMenu) aspectMenu.classList.remove('show');
-  if (playModeMenu) playModeMenu.classList.remove('show');
-});
+// === 菜单互斥与统一关闭 ===
+function closeAllMenus(except) {
+  [speedMenu, subtitleMenu, aspectMenu, playModeMenu].forEach(menu => {
+    if (menu && menu !== except) menu.classList.remove('show');
+  });
+}
+
+// 点击任意非菜单区域关闭菜单
+document.addEventListener('click', () => closeAllMenus());
 
 // === 字幕菜单与字幕控制绑定 ===
 if (subtitleBtn && subtitleMenu) {
   subtitleBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (speedMenu) speedMenu.classList.remove('show');
-    if (aspectMenu) aspectMenu.classList.remove('show');
+    closeAllMenus(subtitleMenu);
     subtitleMenu.classList.toggle('show');
   });
 }
@@ -1001,12 +965,15 @@ video.addEventListener('timeupdate', () => {
 
 // 新视频加载完成时重置进度显示（避免残留上一视频的进度）并触发窗口适应视频比例
 video.addEventListener('loadedmetadata', () => {
+  consecutivePlayErrors = 0; // 成功加载，重置连续失败计数
+  // 换源后 Chromium 会将倍速重置为 1.0，元数据就绪时重新应用用户设置
+  video.playbackRate = currentSpeed;
   if (progressFill) progressFill.style.width = '0%';
   if (currentTimeEl) currentTimeEl.textContent = formatTime(0);
   if (durationEl) durationEl.textContent = formatTime(video.duration);
 
   // 通知主进程调整窗口尺寸及固定宽高比，彻底消除上下左右黑边
-  if (video.videoWidth && video.videoHeight && window.electronAPI && typeof window.electronAPI.resizeToVideo === 'function') {
+  if (video.videoWidth && video.videoHeight) {
     window.electronAPI.resizeToVideo({
       width: video.videoWidth,
       height: video.videoHeight
@@ -1017,11 +984,19 @@ video.addEventListener('loadedmetadata', () => {
 // 视频加载失败提示（损坏文件 / 不支持的格式）
 video.addEventListener('error', () => {
   updatePlayPauseUI(false);
+  // 主动清空播放器(src='' + load())也会触发 error，此时不提示
+  if (!isVideoLoaded) return;
   const ext = currentFilePath ? currentFilePath.split('.').pop().toLowerCase() : '';
   showToast(`视频加载失败：系统无法解码该文件 (${ext || '未知的编码类型'})`);
-  
+
   // 若在播放列表中播放失败，延迟 1.5 秒自动跳过（list-loop 模式下最后一个失败会循环回第一个；single-loop 不自动跳）
   if (playlist.length > 0 && currentPlaylistIndex >= 0 && currentPlaylistIndex < playlist.length && playMode !== 'single-loop') {
+    consecutivePlayErrors++;
+    if (consecutivePlayErrors >= playlist.length) {
+      // 整个列表都已尝试失败，停止跳转，避免无限循环
+      showToast('播放列表中的视频均无法播放，已停止');
+      return;
+    }
     if (autoNextTimer) clearTimeout(autoNextTimer);
     autoNextTimer = setTimeout(() => {
       playPlaylistItem((currentPlaylistIndex + 1) % playlist.length);
@@ -1107,7 +1082,7 @@ function updateVolume(val) {
   video.volume = vol;
   if (volumeSlider) volumeSlider.value = vol;
   setVolumeIcon(vol);
-  persistSettingsDebounced();
+  persistSettings();
 }
 
 if (volumeSlider) {
@@ -1125,10 +1100,10 @@ if (volumeBtn) {
   });
 }
 
-// 全局鼠标滚轮调音（仅视频区域生效；播放列表面板滚动、音量滑块自身、菜单内不干预）
+// 全局鼠标滚轮调音（仅视频区域生效；播放列表面板滚动、音量滑块自身、各菜单内不干预）
 window.addEventListener('wheel', (e) => {
+  if ([speedMenu, subtitleMenu, aspectMenu, playModeMenu].some(m => m && m.contains(e.target))) return;
   if (e.target.closest('#playlist-panel')) return;
-  if (e.target.closest('#speed-menu') || e.target.closest('#subtitle-menu') || e.target.closest('#aspect-menu')) return;
   if (e.target.closest('#volume-range')) return; // 滑块已有 input 事件，避免双重调节
   if (!videoContainer || !videoContainer.contains(e.target)) return;
   e.preventDefault();
@@ -1143,8 +1118,7 @@ window.addEventListener('wheel', (e) => {
 if (speedBtn && speedMenu) {
   speedBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (subtitleMenu) subtitleMenu.classList.remove('show');
-    if (aspectMenu) aspectMenu.classList.remove('show');
+    closeAllMenus(speedMenu);
     speedMenu.classList.toggle('show');
   });
 
@@ -1221,8 +1195,7 @@ window.addEventListener('resize', () => {
 if (aspectRatioBtn && aspectMenu) {
   aspectRatioBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (speedMenu) speedMenu.classList.remove('show');
-    if (subtitleMenu) subtitleMenu.classList.remove('show');
+    closeAllMenus(aspectMenu);
     aspectMenu.classList.toggle('show');
   });
 
@@ -1231,7 +1204,6 @@ if (aspectRatioBtn && aspectMenu) {
       e.stopPropagation();
       const mode = aspectModes.find(m => m.id === item.dataset.aspect);
       if (mode) {
-        currentAspectIndex = aspectModes.indexOf(mode);
         applyAspectMode(mode);
         aspectMenu.classList.remove('show');
         showToast(`画面比例: ${mode.label}`);
@@ -1308,26 +1280,18 @@ function parseAndApplySubtitle(text) {
 
 function parseSubtitleTime(str) {
   if (!str) return NaN;
-  const cleanStr = String(str).trim().split(/\s+/)[0];
-  const parts = cleanStr.split(':');
-  if (parts.length === 3) {
-    const h = parseInt(parts[0], 10) || 0;
-    const min = parseInt(parts[1], 10) || 0;
-    const secParts = parts[2].split(/[.,]/);
-    const sec = parseInt(secParts[0], 10) || 0;
-    const ms = secParts[1] ? parseInt(secParts[1].padEnd(3, '0').slice(0, 3), 10) : 0;
-    return h * 3600 + min * 60 + sec + ms / 1000;
-  } else if (parts.length === 2) {
-    const min = parseInt(parts[0], 10) || 0;
-    const secParts = parts[1].split(/[.,]/);
-    const sec = parseInt(secParts[0], 10) || 0;
-    const ms = secParts[1] ? parseInt(secParts[1].padEnd(3, '0').slice(0, 3), 10) : 0;
-    return min * 60 + sec + ms / 1000;
-  }
-  return NaN;
+  const parts = String(str).trim().split(/\s+/)[0].split(':');
+  if (parts.length === 2) parts.unshift('0'); // mm:ss 补齐为 hh:mm:ss
+  if (parts.length !== 3) return NaN;
+  const h = parseInt(parts[0], 10) || 0;
+  const min = parseInt(parts[1], 10) || 0;
+  const secParts = parts[2].split(/[.,]/);
+  const sec = parseInt(secParts[0], 10) || 0;
+  const ms = secParts[1] ? parseInt(secParts[1].padEnd(3, '0').slice(0, 3), 10) : 0;
+  return h * 3600 + min * 60 + sec + ms / 1000;
 }
 
-// 二分查找当前时间命中的字幕（兼容重叠/长字幕，向前回扫最多 20 条）
+// 二分查找当前时间命中的字幕（兼容重叠/长字幕，向前回扫最多 200 条）
 function findActiveSubtitle(time) {
   if (currentSubtitleData.length === 0) return null;
   // 二分定位最后一个 start <= time 的字幕
@@ -1383,16 +1347,14 @@ if (loadSubBtn) {
   loadSubBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
     subtitleMenu.classList.remove('show');
-    if (window.electronAPI && window.electronAPI.openSubtitleDialog) {
-      try {
-        const filePath = await window.electronAPI.openSubtitleDialog();
-        if (filePath) {
-          const ok = await loadSubtitleFromPath(filePath);
-          showToast(ok ? '字幕导入成功' : '加载字幕文件失败');
-        }
-      } catch (err) {
-        console.error('加载字幕失败:', err);
+    try {
+      const filePath = await window.electronAPI.openSubtitleDialog();
+      if (filePath) {
+        const ok = await loadSubtitleFromPath(filePath);
+        showToast(ok ? '字幕导入成功' : '加载字幕文件失败');
       }
+    } catch (err) {
+      console.error('加载字幕失败:', err);
     }
   });
 }
@@ -1451,28 +1413,10 @@ if (subOffsetDownBtn) {
 // === 续播按钮提示交互 ===
 if (resumeBtn) {
   resumeBtn.addEventListener('click', () => {
+    // 续播提示仅在元数据就绪后弹出，此处 duration 必然可用
     if (pendingResumeTime > 0) {
-      // 记录发起续播时的视频令牌，防止等待元数据期间切换视频后误续播
-      const resumeToken = currentFilePath;
-      const doResume = () => {
-        if (currentFilePath !== resumeToken) return; // 已切换视频，放弃本次续播
-        video.currentTime = pendingResumeTime;
-        showToast(`已为您自动续播至 ${formatTime(pendingResumeTime)}`);
-      };
-      if (video.duration && !isNaN(video.duration)) {
-        doResume();
-      } else {
-        // 元数据尚未就绪，等就绪后再跳转；加载失败时清理监听器避免累积
-        const onLoadError = () => {
-          video.removeEventListener('loadedmetadata', onReady);
-        };
-        const onReady = () => {
-          video.removeEventListener('error', onLoadError);
-          doResume();
-        };
-        video.addEventListener('loadedmetadata', onReady, { once: true });
-        video.addEventListener('error', onLoadError, { once: true });
-      }
+      video.currentTime = pendingResumeTime;
+      showToast(`已为您自动续播至 ${formatTime(pendingResumeTime)}`);
     }
     if (resumeToast) resumeToast.style.display = 'none';
   });
@@ -1485,9 +1429,9 @@ if (closeToastBtn) {
 }
 
 // === 播放模式控制（全部视频循环 / 全部视频随机 / 单个视频循环） ===
+// 仅负责 UI 更新；持久化由调用方按需触发（恢复设置时不写回）
 function updatePlayModeUI(mode, showNotification = true) {
   playMode = mode;
-  persistSettings();
   if (playModeBtn) {
     const iconState = playModeBtn.querySelector('#icon-playmode-state');
     if (iconState) {
@@ -1523,9 +1467,7 @@ function updatePlayModeUI(mode, showNotification = true) {
 if (playModeBtn && playModeMenu) {
   playModeBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (speedMenu) speedMenu.classList.remove('show');
-    if (subtitleMenu) subtitleMenu.classList.remove('show');
-    if (aspectMenu) aspectMenu.classList.remove('show');
+    closeAllMenus(playModeMenu);
     playModeMenu.classList.toggle('show');
   });
 
@@ -1536,6 +1478,7 @@ if (playModeBtn && playModeMenu) {
     const mode = item.getAttribute('data-mode');
     if (mode) {
       updatePlayModeUI(mode, true);
+      persistSettings();
     }
     playModeMenu.classList.remove('show');
   });
@@ -1600,13 +1543,11 @@ function captureScreenshot() {
     }
     // 以 ArrayBuffer 传输，避免大图 base64 字符串经 IPC 结构化克隆造成卡顿
     blob.arrayBuffer().then((buf) => {
-      if (window.electronAPI && window.electronAPI.saveScreenshot) {
-        window.electronAPI.saveScreenshot(buf, defaultName).then(success => {
-          showToast(success ? '截图已成功保存到本地！' : '截图保存失败');
-        }).catch(() => {
-          showToast('截图保存失败');
-        });
-      }
+      window.electronAPI.saveScreenshot(buf, defaultName).then(success => {
+        showToast(success ? '截图已成功保存到本地！' : '截图保存失败');
+      }).catch(() => {
+        showToast('截图保存失败');
+      });
     }).catch(() => {
       showToast('截图失败');
     });
@@ -1616,9 +1557,7 @@ function captureScreenshot() {
 // === 全屏与窗口退出/展开 ===
 function toggleFullscreen() {
   // 真正的全屏（主进程 setFullScreen），区别于窗口最大化
-  if (window.electronAPI && window.electronAPI.fullscreenWindow) {
-    window.electronAPI.fullscreenWindow();
-  }
+  window.electronAPI.fullscreenWindow();
 }
 
 if (fullscreenBtn) fullscreenBtn.addEventListener('click', toggleFullscreen);
@@ -1674,11 +1613,9 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'Escape':
       // 全屏状态下按 Esc 退出全屏
-      if (window.electronAPI && typeof window.electronAPI.isFullScreen === 'function') {
-        window.electronAPI.isFullScreen().then(isFs => {
-          if (isFs) window.electronAPI.fullscreenWindow();
-        }).catch(() => {});
-      }
+      window.electronAPI.isFullScreen().then(isFs => {
+        if (isFs) window.electronAPI.fullscreenWindow();
+      }).catch(() => {});
       break;
     case 'KeyM':
       e.preventDefault();
@@ -1699,10 +1636,7 @@ function showControls() {
     controlsTimeout = setTimeout(() => {
       if (controlBar) controlBar.classList.add('hide');
       if (titleBar) titleBar.classList.add('hide');
-      if (speedMenu) speedMenu.classList.remove('show');
-      if (subtitleMenu) subtitleMenu.classList.remove('show');
-      if (aspectMenu) aspectMenu.classList.remove('show');
-      if (playModeMenu) playModeMenu.classList.remove('show');
+      closeAllMenus();
     }, 3000);
   }
 }

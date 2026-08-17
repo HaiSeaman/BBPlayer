@@ -2,30 +2,15 @@ const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
-// === 性能与内存优化标志设置 ===
+// === 性能与内存优化标志设置（后台节流由 webPreferences.backgroundThrottling:false 统一控制） ===
 app.commandLine.appendSwitch('disable-background-networking');
-app.commandLine.appendSwitch('disable-background-timer-throttling');
-app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 app.commandLine.appendSwitch('disable-breakpad');
-app.commandLine.appendSwitch('disable-client-side-phishing-detection');
-app.commandLine.appendSwitch('disable-default-apps');
-app.commandLine.appendSwitch('disable-dev-shm-usage');
 app.commandLine.appendSwitch('disable-extensions');
-app.commandLine.appendSwitch('disable-sync');
-app.commandLine.appendSwitch('disable-translate');
-app.commandLine.appendSwitch('metrics-recording-only');
-
-// GPU 硬件加速解码与省 CPU 设置
-app.commandLine.appendSwitch('enable-gpu-rasterization');
-app.commandLine.appendSwitch('enable-zero-copy');
-app.commandLine.appendSwitch('ignore-gpu-blocklist');
 
 let mainWindow = null;
 
-const videoExtensions = new Set([
-  '.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm', '.m4v', '.ts',
-  '.rmvb', '.rm', '.3gp', '.mpg', '.mpeg', '.m2ts', '.vob', '.ogv', '.f4v', '.m2v'
-]);
+const VIDEO_EXTS = require('./shared-video-exts');
+const videoExtensions = new Set(VIDEO_EXTS.map(ext => '.' + ext));
 
 function parseFilePathFromArgs(argv) {
   if (!argv || !Array.isArray(argv)) return null;
@@ -35,14 +20,8 @@ function parseFilePathFromArgs(argv) {
     const arg = argv[i];
     if (arg && !arg.startsWith('--')) {
       const ext = path.extname(arg).toLowerCase();
-      if (videoExtensions.has(ext)) {
-        try {
-          if (fs.existsSync(arg)) {
-            return path.resolve(arg);
-          }
-        } catch (e) {
-          // ignore
-        }
+      if (videoExtensions.has(ext) && fs.existsSync(arg)) {
+        return path.resolve(arg);
       }
     }
   }
@@ -51,31 +30,24 @@ function parseFilePathFromArgs(argv) {
 
 let initialFilePath = parseFilePathFromArgs(process.argv);
 
-// 监听 macOS open-file 事件（在顶级运行环境暴露，确保启动早期接收）
-app.on('open-file', (event, filePath) => {
-  event.preventDefault();
-  if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isLoading()) {
-    mainWindow.webContents.send('open-file', filePath);
-  } else {
-    initialFilePath = filePath;
-  }
-});
-
 // 防止多开应用（保证极轻开销）
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
 } else {
-  app.on('second-instance', (event, commandLine, workingDirectory) => {
+  app.on('second-instance', (event, commandLine) => {
+    // window-all-closed 时应用已退出，此处 mainWindow 必然存在
     const filePath = parseFilePathFromArgs(commandLine);
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-      if (filePath) {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+    if (filePath) {
+      // 渲染进程未就绪时先暂存，待 did-finish-load 后统一推送，避免消息丢失
+      if (mainWindow.webContents.isLoading()) {
+        initialFilePath = filePath;
+      } else {
         mainWindow.webContents.send('open-file', filePath);
       }
-    } else if (filePath) {
-      initialFilePath = filePath;
     }
   });
 }
@@ -129,6 +101,14 @@ function createWindow() {
   });
 
   mainWindow.loadFile('index.html');
+
+  // 渲染进程加载完成后，若冷启动/运行中传入的文件尚未被取走则主动推送
+  mainWindow.webContents.on('did-finish-load', () => {
+    if (initialFilePath) {
+      mainWindow.webContents.send('open-file', initialFilePath);
+      initialFilePath = null;
+    }
+  });
 
   // 安全防护：禁止页面打开新窗口与跳转外部导航
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -200,14 +180,10 @@ function isTrustedSender(event) {
 // 软件准备就绪
 app.whenReady().then(() => {
   createWindow();
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
-  });
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
+  app.quit();
 });
 
 // === IPC 原生窗口交互处理 ===
@@ -244,6 +220,21 @@ ipcMain.handle('window:isFullScreen', (event) => {
   return mainWindow ? mainWindow.isFullScreen() : false;
 });
 
+// 本地路径转 file:// URL（沙箱 preload 的 url 模块无 pathToFileURL，由主进程用完整标准库转换）
+const { pathToFileURL } = require('url');
+
+ipcMain.on('path-to-url', (event, filePath) => {
+  let url = '';
+  if (isTrustedSender(event) && typeof filePath === 'string' && filePath) {
+    try {
+      url = pathToFileURL(filePath).href;
+    } catch (err) {
+      console.warn('pathToFileURL 转换失败:', filePath, err);
+    }
+  }
+  event.returnValue = url;
+});
+
 // 获取应用冷启动时传入的文件路径
 ipcMain.handle('app:getInitialFile', (event) => {
   if (!isTrustedSender(event)) return null;
@@ -259,7 +250,7 @@ ipcMain.handle('dialog:openFile', async (event) => {
     title: '选择本地视频文件',
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: '视频文件', extensions: ['mp4', 'mkv', 'avi', 'mov', 'flv', 'wmv', 'webm', 'm4v', 'ts', 'rmvb', 'rm', '3gp', 'mpg', 'mpeg', 'm2ts', 'vob', 'ogv', 'f4v', 'm2v'] },
+      { name: '视频文件', extensions: VIDEO_EXTS },
       { name: '所有文件', extensions: ['*'] }
     ]
   });
@@ -276,7 +267,7 @@ ipcMain.handle('dialog:openSubtitle', async (event) => {
     title: '选择外挂字幕文件',
     properties: ['openFile'],
     filters: [
-      { name: '字幕文件', extensions: ['srt', 'vtt', 'ass'] },
+      { name: '字幕文件', extensions: ['srt', 'vtt', 'ass', 'ssa'] },
       { name: '所有文件', extensions: ['*'] }
     ]
   });
@@ -318,12 +309,13 @@ async function scanDirectorySafe(dirPath, currentDepth = 0, maxDepth = 3, maxFil
 }
 
 ipcMain.handle('dialog:openFolder', async (event) => {
-  if (!mainWindow || !isTrustedSender(event)) return [];
+  if (!mainWindow || !isTrustedSender(event)) return null;
   const result = await dialog.showOpenDialog(mainWindow, {
     title: '选择视频文件夹',
     properties: ['openDirectory']
   });
-  if (result.canceled || result.filePaths.length === 0) return [];
+  // 用户取消返回 null（区别于空结果 []），由渲染进程分别提示
+  if (result.canceled || result.filePaths.length === 0) return null;
   const dir = result.filePaths[0];
   try {
     const files = await scanDirectorySafe(dir);
@@ -335,7 +327,7 @@ ipcMain.handle('dialog:openFolder', async (event) => {
 });
 
 // 读取本地文本文件（字幕），限制扩展名避免任意文件读取
-const ALLOWED_SUBTITLE_EXTS = new Set(['.srt', '.vtt', '.ass', '.ssa', '.sub', '.lrc', '.txt']);
+const ALLOWED_SUBTITLE_EXTS = new Set(['.srt', '.vtt', '.ass', '.ssa']);
 
 ipcMain.handle('file:readText', async (event, filePath) => {
   if (!isTrustedSender(event)) return null;
@@ -353,18 +345,11 @@ ipcMain.handle('file:readText', async (event, filePath) => {
   }
 });
 
-// 导出保存高清截图到本地文件（支持 ArrayBuffer 与 dataURL 两种载荷）
+// 导出保存高清截图到本地文件（渲染进程固定以 ArrayBuffer 载荷传输，避免大图 base64 膨胀）
 ipcMain.handle('dialog:saveScreenshot', async (event, payload) => {
   if (!mainWindow || !isTrustedSender(event)) return false;
-  // 兼容直接传 dataUrl 字符串、旧格式 { dataUrl } 或新格式 { data }（ArrayBuffer）
-  let data = null;
-  if (typeof payload === 'string') {
-    data = payload;
-  } else if (payload && typeof payload === 'object') {
-    data = payload.data !== undefined ? payload.data : payload.dataUrl;
-  }
-  const defaultName = (payload && typeof payload === 'object') ? payload.defaultName : '';
-  if (!data) return false;
+  if (!payload || typeof payload !== 'object' || !(payload.data instanceof ArrayBuffer)) return false;
+  const { data, defaultName } = payload;
 
   const result = await dialog.showSaveDialog(mainWindow, {
     title: '保存视频画面截图',
@@ -374,15 +359,7 @@ ipcMain.handle('dialog:saveScreenshot', async (event, payload) => {
 
   if (!result.canceled && result.filePath) {
     try {
-      if (data instanceof ArrayBuffer) {
-        // 新格式：二进制直写，避免大图 base64 膨胀与解码开销
-        await fs.promises.writeFile(result.filePath, Buffer.from(data));
-      } else if (typeof data === 'string' && data.startsWith('data:image/png;base64,')) {
-        await fs.promises.writeFile(result.filePath, data.replace(/^data:image\/png;base64,/, ''), 'base64');
-      } else {
-        console.warn('保存截图失败：不支持的载荷格式');
-        return false;
-      }
+      await fs.promises.writeFile(result.filePath, Buffer.from(data));
       return true;
     } catch (err) {
       console.error('保存截图失败:', err);
@@ -398,12 +375,7 @@ ipcMain.handle('resize-window-to-video', (event, payload) => {
   if (!payload || typeof payload !== 'object') return false;
   const { width, height } = payload;
   if (!mainWindow || typeof width !== 'number' || typeof height !== 'number' || !isFinite(width) || !isFinite(height)) return false;
-
-  // 0, 0 表示重置取消宽高比锁定
-  if (width === 0 || height === 0) {
-    mainWindow.setAspectRatio(0);
-    return true;
-  }
+  if (width <= 0 || height <= 0) return false;
 
   const aspectRatio = width / height;
   mainWindow.setAspectRatio(aspectRatio);
@@ -443,6 +415,7 @@ ipcMain.on('window-move', (event, payload) => {
   if (!payload || typeof payload !== 'object') return;
   const { x, y } = payload;
   if (!mainWindow || typeof x !== 'number' || typeof y !== 'number') return;
+  if (mainWindow.isFullScreen()) return; // 全屏状态下禁止拖动窗口
 
   const bounds = mainWindow.getBounds();
   const displays = screen.getAllDisplays().map(d => d.workArea);
