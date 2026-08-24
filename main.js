@@ -89,7 +89,7 @@ function createWindow() {
     frame: false, // 默认无边框
     transparent: false,
     backgroundColor: '#08090C',
-    title: 'BB Player',
+    title: 'BBPlayer',
     icon: path.join(__dirname, 'build/icon.png'),
     show: false, // 准备好之后再显示，避免闪烁
     webPreferences: {

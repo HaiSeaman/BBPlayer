@@ -1,7 +1,7 @@
 {
   "name": "bb-player",
   "version": "1.4.0",
-  "description": "极简无边框高性能本地视频播放器",
+  "description": "BBPlayer",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -82,7 +82,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "BB视频播放器"
+      "shortcutName": "BBPlayer"
     }
   }
 }
