@@ -106,7 +106,9 @@ let playlistView = 'list'; // 'list' | 'history'
 let currentFilePath = '';
 let hasRealPath = false; // 是否具有物理路径（决定是否记播放历史）
 let isSeeking = false;
-let controlsTimeout = null;
+let controlsTimeout = null; // 标题栏 3 秒闲置隐藏计时器
+let controlsIdleTimer = null; // 底部功能栏 3 秒闲置兜底计时器
+const CONTROLS_HOTZONE_HEIGHT = 120; // 底部感应区高度（像素）：鼠标进入此范围功能栏才出现
 let toastTimer = null;
 let clickTimer = null; // 单击/双击区分计时器
 let lastVolume = 1.0;
@@ -448,24 +450,20 @@ if (addFolderBtn) {
 }
 
 // === 强力全域拖拽播放支持 (丢入软件任意区域均能识别播放) ===
-['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
-  window.addEventListener(eventName, (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-  }, false);
-});
-
+window.addEventListener('dragenter', (e) => e.preventDefault());
 window.addEventListener('dragover', (e) => {
+  e.preventDefault(); // 必须阻止默认行为，否则浏览器会直接打开被拖入的文件
   if (videoContainer) videoContainer.classList.add('drag-over');
 });
-
 window.addEventListener('dragleave', (e) => {
+  // 仅当鼠标真正离开窗口（坐标归零）时才取消高亮，掠过子元素不清除
   if (e.clientX === 0 && e.clientY === 0) {
     if (videoContainer) videoContainer.classList.remove('drag-over');
   }
 });
 
 window.addEventListener('drop', (e) => {
+  e.preventDefault(); // 阻止浏览器默认打开被拖入的文件
   if (videoContainer) videoContainer.classList.remove('drag-over');
 
   const files = e.dataTransfer ? Array.from(e.dataTransfer.files) : [];
@@ -778,30 +776,29 @@ if (video) {
   });
 }
 
-// 上一首 / 下一首
+// 上一首 / 下一首（随机模式下随机跳转，否则顺序循环）
+function skipPlaylist(step) {
+  if (playlist.length === 0) return;
+  if (playMode === 'random' && playlist.length > 1) {
+    playPlaylistItem(randomIndexExcluding(currentPlaylistIndex));
+  } else {
+    const delta = currentPlaylistIndex + step;
+    const next = delta < 0 ? playlist.length - 1 : delta % playlist.length;
+    playPlaylistItem(next);
+  }
+}
+
 if (prevBtn) {
   prevBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (playlist.length === 0) return;
-    if (playMode === 'random' && playlist.length > 1) {
-      playPlaylistItem(randomIndexExcluding(currentPlaylistIndex));
-    } else {
-      const next = currentPlaylistIndex <= 0 ? playlist.length - 1 : currentPlaylistIndex - 1;
-      playPlaylistItem(next);
-    }
+    skipPlaylist(-1);
   });
 }
 
 if (nextBtn) {
   nextBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (playlist.length === 0) return;
-    if (playMode === 'random' && playlist.length > 1) {
-      playPlaylistItem(randomIndexExcluding(currentPlaylistIndex));
-    } else {
-      const next = currentPlaylistIndex >= playlist.length - 1 ? 0 : currentPlaylistIndex + 1;
-      playPlaylistItem(next);
-    }
+    skipPlaylist(1);
   });
 }
 
@@ -915,7 +912,6 @@ if (video) {
           clickTimer = null;
           togglePlayPause();
         }, 250);
-        showControls();
       }
     };
 
@@ -1624,26 +1620,80 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// === 鼠标闲置自动隐藏工具栏逻辑 ===
-function showControls() {
-  if (controlBar) controlBar.classList.remove('hide');
+// === 底部功能栏：hover 唤出 / 移开即隐 / 3 秒闲置兜底 ===
+
+// 判断本次鼠标事件的目标是否落在功能栏本体上（含其向上弹出的子菜单，
+// 因为倍速/比例/字幕/播放模式菜单在 DOM 上都是 #controls-overlay 的后代）
+function isPointerOverControlBar(e) {
+  return !!(e && e.target && e.target.closest && e.target.closest('#controls-overlay'));
+}
+
+// 鼠标移开感应区且不在功能栏上时立即隐藏
+function hideControlsNow() {
+  if (controlsIdleTimer) {
+    clearTimeout(controlsIdleTimer);
+    controlsIdleTimer = null;
+  }
+  if (controlBar) controlBar.classList.add('hide');
+  closeAllMenus();
+}
+
+// 标题栏保持原有规矩：全窗口 mousemove/click 唤出，播放中 3 秒无操作隐藏
+function showTitleBar() {
   if (titleBar) titleBar.classList.remove('hide');
 
   if (controlsTimeout) clearTimeout(controlsTimeout);
 
-  // 仅在视频处于播放状态时，3秒后自动隐藏
   if (!video.paused) {
     controlsTimeout = setTimeout(() => {
-      if (controlBar) controlBar.classList.add('hide');
       if (titleBar) titleBar.classList.add('hide');
+    }, 3000);
+  }
+}
+
+// 功能栏显示 + 播放中启动 3 秒闲置兜底计时（悬停在功能栏上时不走这条路径）
+function showControls() {
+  if (controlBar) controlBar.classList.remove('hide');
+
+  if (controlsIdleTimer) clearTimeout(controlsIdleTimer);
+
+  if (!video.paused) {
+    controlsIdleTimer = setTimeout(() => {
+      controlsIdleTimer = null;
+      if (controlBar) controlBar.classList.add('hide');
       closeAllMenus();
     }, 3000);
   }
 }
 
+// 每次鼠标移动时统一裁决功能栏的去留
+function updateControlsOnMouseMove(e) {
+  // 鼠标悬停在功能栏本体上：一直保持显示，不启动任何隐藏计时
+  if (isPointerOverControlBar(e)) {
+    if (controlBar) controlBar.classList.remove('hide');
+    if (controlsIdleTimer) {
+      clearTimeout(controlsIdleTimer);
+      controlsIdleTimer = null;
+    }
+    return;
+  }
+
+  const rect = videoContainer.getBoundingClientRect();
+  const inHotzone = (rect.bottom - e.clientY) <= CONTROLS_HOTZONE_HEIGHT;
+
+  if (inHotzone) {
+    showControls(); // 踩进底部感应区：唤出功能栏（含 3 秒兜底）
+  } else if (controlBar && !controlBar.classList.contains('hide')) {
+    hideControlsNow(); // 已离开感应区：立刻收起
+  }
+}
+
 if (videoContainer) {
-  videoContainer.addEventListener('mousemove', showControls);
-  videoContainer.addEventListener('click', showControls);
+  videoContainer.addEventListener('mousemove', (e) => {
+    showTitleBar();
+    updateControlsOnMouseMove(e);
+  });
+  videoContainer.addEventListener('click', showTitleBar);
 }
 
 // === 软件无边框顶部原生控件事件绑定 ===
