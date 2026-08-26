@@ -16,14 +16,13 @@ window.electronAPI.onOpenFile((filePath) => {
   }
 });
 
-// 窗口最小化自动暂停与恢复
+// 窗口最小化自动暂停与恢复（不弹提示：最小化时用户看不到 Toast，恢复时安静续播即可）
 let wasPlayingBeforeMinimize = false;
 window.electronAPI.onWindowMinimized(() => {
   if (video && !video.paused && isVideoLoaded) {
     wasPlayingBeforeMinimize = true;
     video.pause();
     updatePlayPauseUI(false);
-    showToast('窗口已最小化，自动暂停播放');
   }
 });
 window.electronAPI.onWindowRestored(() => {
@@ -134,6 +133,11 @@ function formatTime(seconds) {
   return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
 }
 
+// 倍速显示统一格式：整数保留一位小数（1.0x），非整数原样（1.25x），避免 toFixed(1) 把 1.25 显示成 1.3x
+function formatSpeed(speed) {
+  return `${Number.isInteger(speed * 10) ? (speed * 10 / 10).toFixed(1) : String(speed)}x`;
+}
+
 // 轻提示 Toast 弹窗（连续调用时重置计时器，避免提前消失）
 function showToast(message) {
   if (!toastNotice) return;
@@ -195,7 +199,9 @@ function persistSettings() {
   try {
     const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     if (typeof s.volume === 'number') video.volume = Math.max(0, Math.min(1, s.volume));
-    if (typeof s.speed === 'number') currentSpeed = s.speed;
+    // 倍速必须钳制在合法范围：localStorage 损坏存入 0/负数/超大值时，
+    // playbackRate 赋值会抛异常并中断后续所有设置的恢复
+    if (typeof s.speed === 'number' && isFinite(s.speed) && s.speed >= 0.25 && s.speed <= 4) currentSpeed = s.speed;
     if (typeof s.subtitleOffset === 'number') subtitleOffset = Math.max(-60, Math.min(60, s.subtitleOffset));
     if (typeof s.subtitleFontSize === 'number') currentSubtitleFontSize = Math.max(12, Math.min(48, s.subtitleFontSize));
     if (typeof s.subtitleVisible === 'boolean') isSubtitleVisible = s.subtitleVisible;
@@ -207,9 +213,11 @@ function persistSettings() {
       customSubtitle.style.fontSize = `${currentSubtitleFontSize}px`;
       customSubtitle.style.display = isSubtitleVisible ? 'block' : 'none';
     }
+    // 字幕开关菜单文案与恢复的状态保持一致
+    if (toggleSubBtn) toggleSubBtn.textContent = isSubtitleVisible ? '隐藏字幕' : '显示字幕';
     if (volumeSlider) volumeSlider.value = video.volume;
     setVolumeIcon(video.volume);
-    if (speedBtn) speedBtn.textContent = `${currentSpeed.toFixed(1)}x`;
+    if (speedBtn) speedBtn.textContent = formatSpeed(currentSpeed);
     if (speedMenu) {
       speedMenu.querySelectorAll('.menu-item').forEach(i => {
         i.classList.toggle('active', parseFloat(i.getAttribute('data-speed')) === currentSpeed);
@@ -232,8 +240,12 @@ function revokeCurrentBlobUrl() {
 
 let autoNextTimer = null;
 
-// 连续播放失败计数（成功加载元数据时清零）；达到列表总数说明全部无法播放，停止自动跳转
-let consecutivePlayErrors = 0;
+// 加载序号令牌：loadAndPlayVideo 已异步化（等待主进程转 URL），
+// 快速连续切换视频时旧调用在 await 后作废，防止交错写入播放器状态
+let loadSequence = 0;
+
+// 连续播放失败集合（成功加载元数据时清空）；列表内所有条目都失败过才停止自动跳转
+let failedPlaylistKeys = new Set();
 
 function clearAutoNextTimer() {
   if (autoNextTimer) {
@@ -243,8 +255,10 @@ function clearAutoNextTimer() {
 }
 
 // === 核心：通用视频加载与播放函数 (双重保险机制) ===
-function loadAndPlayVideo(filePathOrFile) {
+async function loadAndPlayVideo(filePathOrFile) {
   if (!filePathOrFile) return;
+
+  const seq = ++loadSequence; // 本次加载的令牌
 
   let targetSrc = '';
   let fileName = '';
@@ -255,7 +269,7 @@ function loadAndPlayVideo(filePathOrFile) {
     fullPath = filePathOrFile;
     fileName = filePathOrFile.split(/[\\/]/).pop();
     hasRealPath = true;
-    targetSrc = window.electronAPI.toFileUrl(fullPath);
+    targetSrc = await window.electronAPI.toFileUrl(fullPath);
   } else if (filePathOrFile instanceof File) {
     fileName = filePathOrFile.name;
     // 从原生 API 提取物理路径（失败时返回空串，走 Blob 播放）
@@ -264,7 +278,7 @@ function loadAndPlayVideo(filePathOrFile) {
     if (extractedPath) {
       fullPath = extractedPath;
       hasRealPath = true;
-      targetSrc = window.electronAPI.toFileUrl(extractedPath);
+      targetSrc = await window.electronAPI.toFileUrl(extractedPath);
     } else {
       // 降级双保险：URL.createObjectURL(file) 内存直接播放（无物理路径，不记历史）
       revokeCurrentBlobUrl();
@@ -273,6 +287,9 @@ function loadAndPlayVideo(filePathOrFile) {
       fullPath = filePathOrFile.name;
     }
   }
+
+  // 异步等待期间用户已切换到其他视频：本次加载整体作废，避免旧状态覆盖新视频
+  if (seq !== loadSequence) return;
 
   if (!targetSrc) {
     showToast('无法解析视频源');
@@ -294,6 +311,12 @@ function loadAndPlayVideo(filePathOrFile) {
   // 重置续播状态（新视频不沿用上一部的续播提示）
   pendingResumeTime = 0;
   if (resumeToast) resumeToast.style.display = 'none';
+
+  // 重置进度打卡基准（防止新旧视频秒数撞车丢一次保存）
+  lastSavedProgressSec = -1;
+
+  // 字幕状态重置完成后，若本次加载的正是随拖字幕配套的视频，立即应用登记的字幕
+  tryApplyPendingDropSubtitle();
 
   video.src = targetSrc;
 
@@ -356,10 +379,10 @@ async function loadSubtitleFromPath(filePath, expectedVideoPath) {
   return false;
 }
 
-// 检查同名本地字幕（依次尝试 .srt / .vtt / .ass）
+// 检查同名本地字幕（依次尝试 .srt / .vtt / .ass / .ssa，与主进程白名单一致）
 async function checkAndAutoLoadSubtitles(basePath) {
   const videoKey = currentFilePath; // 发起时的视频路径（令牌）
-  for (const ext of ['.srt', '.vtt', '.ass']) {
+  for (const ext of ['.srt', '.vtt', '.ass', '.ssa']) {
     try {
       const ok = await loadSubtitleFromPath(basePath + ext, videoKey);
       if (ok) {
@@ -422,14 +445,17 @@ if (openFileBtn) {
 // === 打开整个文件夹，把其中视频全部加入播放列表 ===
 async function openFolderAndAdd() {
   try {
-    const files = await window.electronAPI.openFolderDialog();
-    if (files === null) return; // 用户取消选择
-    if (files.length === 0) {
+    const result = await window.electronAPI.openFolderDialog();
+    if (result === null) return; // 用户取消选择
+    const { files, truncated } = result;
+    if (!files || files.length === 0) {
       showToast('所选文件夹中没有视频文件');
       return;
     }
     const added = addFilesToPlaylist(files);
-    if (added > 0) showToast(`已添加文件夹中的 ${added} 个视频`);
+    if (added > 0) {
+      showToast(`已添加文件夹中的 ${added} 个视频${truncated ? '（文件夹较大，超出上限的部分未载入）' : ''}`);
+    }
   } catch (err) {
     console.error('打开文件夹失败:', err);
   }
@@ -450,20 +476,82 @@ if (addFolderBtn) {
 }
 
 // === 强力全域拖拽播放支持 (丢入软件任意区域均能识别播放) ===
-window.addEventListener('dragenter', (e) => e.preventDefault());
-window.addEventListener('dragover', (e) => {
-  e.preventDefault(); // 必须阻止默认行为，否则浏览器会直接打开被拖入的文件
+
+// 字幕编码嗅探：BOM 识别 → UTF-8 严格解码 → GBK 回退（中文 ANSI 老字幕必备）。
+// 与 main.js 中主进程 readText 路径的 decodeSubtitleBuffer 保持同步。
+function decodeSubtitleBuffer(bytes) {
+  if (!bytes || bytes.length === 0) return '';
+  if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+    return new TextDecoder('utf-8').decode(bytes.subarray(3));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE) {
+    return new TextDecoder('utf-16le').decode(bytes.subarray(2));
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) {
+    return new TextDecoder('utf-16be').decode(bytes.subarray(2));
+  }
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch (e) {
+    try {
+      return new TextDecoder('gbk').decode(bytes);
+    } catch (e2) {
+      return new TextDecoder('latin1').decode(bytes); // 终极兜底，至少不抛异常
+    }
+  }
+}
+
+// 随视频一起拖入的字幕登记处：{ forVideo, text }。
+// 视频 URL 转换与字幕文件解码都是异步的，先后顺序不定，
+// 因此双方完成后各自查登记表，谁后到谁触发应用（事件驱动，避免轮询与竞态）
+let pendingDropSubtitle = null;
+
+// 尝试应用登记中的字幕：仅当字幕文本已解码且当前播放的正是配套视频时生效
+function tryApplyPendingDropSubtitle() {
+  if (!pendingDropSubtitle || !pendingDropSubtitle.text) return;
+  if (currentFilePath !== pendingDropSubtitle.forVideo) return;
+  parseAndApplySubtitle(pendingDropSubtitle.text);
+  showToast('已加载拖入的字幕');
+  pendingDropSubtitle = null;
+}
+
+// 拖入字幕文件：读 ArrayBuffer 后按编码嗅探解码，避免 GBK 字幕按 UTF-8 读出乱码
+function loadDraggedSubtitle(file, forVideoKey) {
+  file.arrayBuffer().then((buf) => {
+    const text = decodeSubtitleBuffer(new Uint8Array(buf));
+    if (forVideoKey) {
+      // 与视频混拖：登记后由 tryApplyPendingDropSubtitle 择机应用。
+      // 无条件覆盖旧登记：旧登记未被应用说明配套视频已被切走或字幕损坏，已无保留价值
+      pendingDropSubtitle = { forVideo: forVideoKey, text };
+      tryApplyPendingDropSubtitle();
+    } else if (text) {
+      // 仅拖字幕：直接应用到当前画面
+      parseAndApplySubtitle(text);
+      showToast('已加载拖入的字幕');
+    }
+  }).catch((err) => {
+    console.warn('读取拖入字幕失败:', err);
+    if (!forVideoKey) showToast('读取字幕文件失败');
+  });
+}
+
+let dragDepth = 0; // 嵌套计数：dragenter/dragleave 成对触发，归零才算真正离开窗口
+window.addEventListener('dragenter', (e) => {
+  e.preventDefault();
+  dragDepth++;
   if (videoContainer) videoContainer.classList.add('drag-over');
 });
-window.addEventListener('dragleave', (e) => {
-  // 仅当鼠标真正离开窗口（坐标归零）时才取消高亮，掠过子元素不清除
-  if (e.clientX === 0 && e.clientY === 0) {
-    if (videoContainer) videoContainer.classList.remove('drag-over');
-  }
+window.addEventListener('dragover', (e) => {
+  e.preventDefault(); // 必须阻止默认行为，否则浏览器会直接打开被拖入的文件
+});
+window.addEventListener('dragleave', () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0 && videoContainer) videoContainer.classList.remove('drag-over');
 });
 
 window.addEventListener('drop', (e) => {
   e.preventDefault(); // 阻止浏览器默认打开被拖入的文件
+  dragDepth = 0;
   if (videoContainer) videoContainer.classList.remove('drag-over');
 
   const files = e.dataTransfer ? Array.from(e.dataTransfer.files) : [];
@@ -483,20 +571,21 @@ window.addEventListener('drop', (e) => {
     return ['srt', 'vtt', 'ass', 'ssa'].includes(ext);
   });
 
-  // 处理拖入的字幕
-  if (subtitleFiles.length > 0 && videoFiles.length === 0) {
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      parseAndApplySubtitle(evt.target.result);
-      showToast('已加载拖入的字幕');
-    };
-    reader.readAsText(subtitleFiles[0]);
+  // 处理拖入的视频（同时拖了视频+字幕时也照常加入列表）
+  if (videoFiles.length > 0) {
+    // 记录第一个视频的唯一 key：若它随后被自动播放，配套字幕才能安全应用
+    const firstVideoKey = window.electronAPI.getFilePath(videoFiles[0]) || videoFiles[0].name;
+    addFilesToPlaylist(videoFiles);
+
+    if (subtitleFiles.length > 0) {
+      loadDraggedSubtitle(subtitleFiles[0], firstVideoKey);
+    }
     return;
   }
 
-  // 处理拖入的视频
-  if (videoFiles.length > 0) {
-    addFilesToPlaylist(videoFiles);
+  // 仅拖入字幕：直接应用到当前播放画面
+  if (subtitleFiles.length > 0) {
+    loadDraggedSubtitle(subtitleFiles[0], null);
   }
 });
 
@@ -547,10 +636,12 @@ function renderPlaylist() {
     return;
   }
 
-  playlistItemsContainer.innerHTML = '';
+  // DocumentFragment 批量构建后一次性挂载，避免大列表逐条插入造成的多次回流
+  const frag = document.createDocumentFragment();
   playlist.forEach((item, index) => {
     const div = document.createElement('div');
     div.className = `playlist-item ${index === currentPlaylistIndex ? 'active' : ''}`;
+    div.dataset.index = String(index);
 
     const nameSpan = document.createElement('span');
     nameSpan.className = 'item-name';
@@ -564,17 +655,27 @@ function renderPlaylist() {
 
     div.appendChild(nameSpan);
     div.appendChild(removeBtn);
+    frag.appendChild(div);
+  });
 
-    div.addEventListener('click', (e) => {
-      if (e.target.classList.contains('remove-btn')) {
-        e.stopPropagation();
-        removePlaylistItem(index);
-      } else {
-        playPlaylistItem(index);
-      }
-    });
+  playlistItemsContainer.innerHTML = '';
+  playlistItemsContainer.appendChild(frag);
+}
 
-    playlistItemsContainer.appendChild(div);
+// 播放列表点击统一走事件委托（绑定一次，条目再多也只有单个监听器）
+if (playlistItemsContainer) {
+  playlistItemsContainer.addEventListener('click', (e) => {
+    if (playlistView !== 'list') return; // 历史视图条目有自己的独立绑定
+    const itemDiv = e.target.closest('.playlist-item');
+    if (!itemDiv || !itemDiv.dataset.index) return;
+    const index = Number(itemDiv.dataset.index);
+    if (!Number.isInteger(index) || index < 0 || index >= playlist.length) return;
+    if (e.target.classList.contains('remove-btn')) {
+      e.stopPropagation();
+      removePlaylistItem(index);
+    } else {
+      playPlaylistItem(index);
+    }
   });
 }
 
@@ -666,11 +767,13 @@ if (historyViewBtn) {
 
 // 将播放器重置为空状态（播放列表由调用方清空）
 function resetPlayerToEmpty() {
+  clearAutoNextTimer(); // 挂起的"1秒后自动切集"必须作废，防止清空后误播新加入的视频
   currentPlaylistIndex = -1;
   hasRealPath = false;
   currentFilePath = '';
   currentSubtitleData = [];
   pendingResumeTime = 0;
+  lastSavedProgressSec = -1;
   revokeCurrentBlobUrl();
   if (customSubtitle) customSubtitle.style.display = 'none';
   if (resumeToast) resumeToast.style.display = 'none';
@@ -961,7 +1064,7 @@ video.addEventListener('timeupdate', () => {
 
 // 新视频加载完成时重置进度显示（避免残留上一视频的进度）并触发窗口适应视频比例
 video.addEventListener('loadedmetadata', () => {
-  consecutivePlayErrors = 0; // 成功加载，重置连续失败计数
+  failedPlaylistKeys.clear(); // 成功加载，清空失败记录
   // 换源后 Chromium 会将倍速重置为 1.0，元数据就绪时重新应用用户设置
   video.playbackRate = currentSpeed;
   if (progressFill) progressFill.style.width = '0%';
@@ -985,17 +1088,23 @@ video.addEventListener('error', () => {
   const ext = currentFilePath ? currentFilePath.split('.').pop().toLowerCase() : '';
   showToast(`视频加载失败：系统无法解码该文件 (${ext || '未知的编码类型'})`);
 
-  // 若在播放列表中播放失败，延迟 1.5 秒自动跳过（list-loop 模式下最后一个失败会循环回第一个；single-loop 不自动跳）
+  // 若在播放列表中播放失败，延迟 1.5 秒自动跳到下一个"没失败过"的视频；
+  // 全部条目都失败过才停止（用集合记录而非计数，列表中途增删也不会误判）
   if (playlist.length > 0 && currentPlaylistIndex >= 0 && currentPlaylistIndex < playlist.length && playMode !== 'single-loop') {
-    consecutivePlayErrors++;
-    if (consecutivePlayErrors >= playlist.length) {
-      // 整个列表都已尝试失败，停止跳转，避免无限循环
+    failedPlaylistKeys.add(currentFilePath);
+    if (playlist.every(item => failedPlaylistKeys.has(item.key))) {
       showToast('播放列表中的视频均无法播放，已停止');
       return;
     }
     if (autoNextTimer) clearTimeout(autoNextTimer);
     autoNextTimer = setTimeout(() => {
-      playPlaylistItem((currentPlaylistIndex + 1) % playlist.length);
+      const startIdx = (currentPlaylistIndex + 1) % playlist.length;
+      let idx = startIdx;
+      do {
+        if (!failedPlaylistKeys.has(playlist[idx].key)) break;
+        idx = (idx + 1) % playlist.length;
+      } while (idx !== startIdx); // 全失败场景已在上方拦截，此处必有未失败项
+      playPlaylistItem(idx);
     }, 1500);
   }
 });
@@ -1127,11 +1236,11 @@ if (speedBtn && speedMenu) {
     if (!isNaN(speed)) {
       currentSpeed = speed;
       video.playbackRate = speed;
-      if (speedBtn) speedBtn.textContent = `${speed.toFixed(1)}x`;
+      if (speedBtn) speedBtn.textContent = formatSpeed(speed);
       speedMenu.querySelectorAll('.menu-item').forEach(i => i.classList.remove('active'));
       item.classList.add('active');
       speedMenu.classList.remove('show');
-      showToast(`已切换至 ${speed.toFixed(1)}x 倍速`);
+      showToast(`已切换至 ${formatSpeed(speed)} 倍速`);
       persistSettings();
     }
   });
@@ -1216,6 +1325,12 @@ function stripAssTags(text) {
   return text.replace(/\{[^}]*\}/g, '').replace(/\\N/g, '\n').trim();
 }
 
+// 剥离 SRT/VTT 内联标签（<i> <b> <font ...> <c.xxx> <v 名字> 等），
+// 本播放器以纯文本渲染，不剥离会原样显示成文字。只匹配字母开头的标签，避免误删正文中的比较符号
+function stripInlineTags(text) {
+  return text.replace(/<\/?[A-Za-z][^>]{0,63}>/g, '');
+}
+
 function parseAndApplySubtitle(text) {
   currentSubtitleData = [];
   if (!text) return;
@@ -1261,7 +1376,7 @@ function parseAndApplySubtitle(text) {
         const [startStr, endStr] = timeLine.split('-->').map(s => s.trim());
         const startTime = parseSubtitleTime(startStr);
         const endTime = parseSubtitleTime(endStr);
-        const subText = textLines.join('\n');
+        const subText = stripInlineTags(textLines.join('\n'));
         if (!isNaN(startTime) && !isNaN(endTime) && subText) {
           currentSubtitleData.push({ start: startTime, end: endTime, text: subText });
         }
@@ -1359,6 +1474,8 @@ if (toggleSubBtn) {
   toggleSubBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     isSubtitleVisible = !isSubtitleVisible;
+    // 同步菜单文案，让用户随时能看出当前字幕是显示还是隐藏状态
+    toggleSubBtn.textContent = isSubtitleVisible ? '隐藏字幕' : '显示字幕';
     renderSubtitlesAt(video.currentTime);
     showToast(isSubtitleVisible ? '显示字幕' : '隐藏字幕');
     persistSettings();
