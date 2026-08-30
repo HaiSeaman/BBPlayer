@@ -119,6 +119,86 @@ let currentSpeed = 1.0;
 let currentRotation = 0; // 顺时针旋转角度：0 / 90 / 180 / 270
 let playMode = 'list-loop'; // 'list-loop' (全部视频循环) | 'random' (全部视频随机) | 'single-loop' (单个视频循环)
 
+// === 音量增益管线（Web Audio：音量可放大到 0%~200%，带防破音保护） ===
+// 原理：在 <video> 与扬声器之间加装“数字功放”。video.volume 被系统限制在 0~1（0%~100%），
+// 但 GainNode 放大倍率无上限，可把音频信号物理放大到 200% 甚至更高。
+let audioCtx = null;
+let gainNode = null;
+let audioPipelineReady = false; // 增益管线是否可用（初始化失败则回退原生音量 0~100%）
+let masterVolume = 1.0;         // 用户音量 0.0 ~ 2.0：0~1 原生区，1~2 增益放大区
+
+// 惰性初始化音频增益管线。铁律：同一个 <video> 一生只能绑定一次 MediaElementSource，
+// 重复绑定会抛错，因此必须保证本函数只成功执行一次（换片/切歌时绝不重建）。
+function initAudioPipeline() {
+  if (audioPipelineReady) return true;
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return false;
+
+    audioCtx = new AudioContextClass();
+
+    // 1) 视频声源接入调音台（仅此一次，成功后永久绑定）
+    const sourceNode = audioCtx.createMediaElementSource(video);
+
+    // 2) 增益放大器：负责 100%~200% 的扩展音量
+    gainNode = audioCtx.createGain();
+    gainNode.gain.value = 1.0;
+
+    // 3) 防破音动态压缩器（安全气囊）：常规音量（峰值低于 -3dB）完全不受影响，
+    //    一旦放大后接近 0dB 峰值，自动柔和削平毛刺，防止喇叭“滋啦”破音。
+    const compressor = audioCtx.createDynamicsCompressor();
+    compressor.threshold.setValueAtTime(-3, audioCtx.currentTime);
+    compressor.knee.setValueAtTime(6, audioCtx.currentTime);
+    compressor.ratio.setValueAtTime(20, audioCtx.currentTime);
+    compressor.attack.setValueAtTime(0.002, audioCtx.currentTime);
+    compressor.release.setValueAtTime(0.1, audioCtx.currentTime);
+
+    // 4) 串联管线：视频源 -> 增益放大器 -> 防破音压缩器 -> 扬声器
+    sourceNode.connect(gainNode);
+    gainNode.connect(compressor);
+    compressor.connect(audioCtx.destination);
+
+    audioPipelineReady = true;
+    console.log('[BBPlayer] 音频增益管线已就绪：音量支持 0%~200%，防破音已启用');
+    // 兜底激活调音台：部分自动播放策略下 AudioContext 会处于挂起状态
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    return true;
+  } catch (err) {
+    console.warn('音频增益管线初始化失败，回退到原生音量控制(0%~100%):', err);
+    audioPipelineReady = false;
+    return false;
+  }
+}
+
+// 统一应用音量：masterVolume 范围 0~2。
+// 增益可用时：video.volume 固定满格，总音量完全交给 gainNode 放大；
+// 增益不可用（初始化失败回退）：直接限制在原生 0~1。
+function applyMasterVolume() {
+  const clamped = Math.max(0, Math.min(2.0, masterVolume));
+  masterVolume = clamped;
+
+  if (audioPipelineReady && audioCtx && gainNode) {
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    const now = audioCtx.currentTime;
+    gainNode.gain.cancelScheduledValues(now);
+    // 指数平滑过渡（约 10ms 趋近目标），防止瞬间拉高音量产生“啪”的爆音
+    gainNode.gain.setTargetAtTime(clamped, now, 0.01);
+    video.volume = 1; // 增益模式下视频元素保持满格
+  } else {
+    video.volume = Math.min(1.0, clamped);
+  }
+
+  // UI 同步：滑块值、音量图标、超量警示样式与按钮提示
+  if (volumeSlider) volumeSlider.value = String(clamped);
+  setVolumeIcon(clamped);
+  if (volumeSlider) volumeSlider.classList.toggle('boost', clamped > 1);
+  if (volumeBtn) {
+    volumeBtn.title = clamped > 1
+      ? `音量 ${Math.round(clamped * 100)}%（增益放大，已开启防破音）`
+      : `音量 ${Math.round(clamped * 100)}% / 静音`;
+  }
+}
+
 const HISTORY_KEY = 'bb_player_history';
 const SETTINGS_KEY = 'bb_player_settings';
 const HISTORY_MAX = 200;
@@ -183,7 +263,7 @@ function saveHistoryEntry(pathKey, time) {
 function persistSettings() {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
-      volume: video.volume,
+      volume: masterVolume,
       speed: currentSpeed,
       subtitleOffset,
       subtitleFontSize: currentSubtitleFontSize,
@@ -197,8 +277,10 @@ function persistSettings() {
 
 (function restoreSettings() {
   try {
+    initAudioPipeline(); // 先初始化增益管线，让恢复的音量走统一“数字功放”管道
     const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
-    if (typeof s.volume === 'number') video.volume = Math.max(0, Math.min(1, s.volume));
+    // 音量范围 0~200%：旧存档只有 0~1，直接兼容；非法值或损坏数据钳制回安全范围
+    if (typeof s.volume === 'number' && isFinite(s.volume)) masterVolume = Math.max(0, Math.min(2, s.volume));
     // 倍速必须钳制在合法范围：localStorage 损坏存入 0/负数/超大值时，
     // playbackRate 赋值会抛异常并中断后续所有设置的恢复
     if (typeof s.speed === 'number' && isFinite(s.speed) && s.speed >= 0.25 && s.speed <= 4) currentSpeed = s.speed;
@@ -215,8 +297,7 @@ function persistSettings() {
     }
     // 字幕开关菜单文案与恢复的状态保持一致
     if (toggleSubBtn) toggleSubBtn.textContent = isSubtitleVisible ? '隐藏字幕' : '显示字幕';
-    if (volumeSlider) volumeSlider.value = video.volume;
-    setVolumeIcon(video.volume);
+    applyMasterVolume(); // 应用恢复的 0~200% 音量并统一同步滑块/图标/警示样式
     if (speedBtn) speedBtn.textContent = formatSpeed(currentSpeed);
     if (speedMenu) {
       speedMenu.querySelectorAll('.menu-item').forEach(i => {
@@ -1183,10 +1264,9 @@ function setVolumeIcon(vol) {
 }
 
 function updateVolume(val) {
-  const vol = Math.max(0, Math.min(1, parseFloat(val)));
-  video.volume = vol;
-  if (volumeSlider) volumeSlider.value = vol;
-  setVolumeIcon(vol);
+  // 支持 0~2（0%~200%）：0~1 原生音量区，1~2 由增益放大器扩展
+  masterVolume = Math.max(0, Math.min(2.0, parseFloat(val) || 0));
+  applyMasterVolume();
   persistSettings();
 }
 
@@ -1196,8 +1276,8 @@ if (volumeSlider) {
 
 if (volumeBtn) {
   volumeBtn.addEventListener('click', () => {
-    if (video.volume > 0) {
-      lastVolume = video.volume;
+    if (masterVolume > 0) {
+      lastVolume = masterVolume;
       updateVolume(0);
     } else {
       updateVolume(lastVolume || 1.0);
@@ -1213,9 +1293,9 @@ window.addEventListener('wheel', (e) => {
   if (!videoContainer || !videoContainer.contains(e.target)) return;
   e.preventDefault();
   if (e.deltaY < 0) {
-    updateVolume(video.volume + 0.05);
+    updateVolume(masterVolume + 0.05);
   } else {
-    updateVolume(video.volume - 0.05);
+    updateVolume(masterVolume - 0.05);
   }
 }, { passive: false });
 
@@ -1710,11 +1790,11 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'ArrowUp':
       e.preventDefault();
-      updateVolume(video.volume + 0.05);
+      updateVolume(masterVolume + 0.05);
       break;
     case 'ArrowDown':
       e.preventDefault();
-      updateVolume(video.volume - 0.05);
+      updateVolume(masterVolume - 0.05);
       break;
     case 'KeyS':
       e.preventDefault();

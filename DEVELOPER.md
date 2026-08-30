@@ -111,9 +111,44 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 极端竖屏视频在"最小宽 480px 补偿导致高度超出工作区"时，优先保证不溢出屏幕并放弃锁比例。
 下次加载新视频自动重新贴合。
 
+### 10. Web Audio API 200% 音频增益与防破音管线（v1.4.2 新增）
+
+原生 HTML5 `<video>` 的 `volume` 属性被浏览器限制在 `[0, 1]` 范围。为支持 200% 音量（声音翻倍 Audio Gain/Boost），引入了基于 **Web Audio API** 的专业级数字调音管线：
+
+```
+[HTML5 <video>]
+      │ (MediaElementAudioSourceNode)
+      ▼
+ [GainNode 增益放大器] ── 0.0 ~ 2.0 (即 0% ~ 200%)
+      │ (线性声压放大)
+      ▼
+[DynamicsCompressorNode 动态压缩器] ── 防破音安全气囊 (Threshold: -3dB, Ratio: 12:1)
+      │
+      ▼
+[AudioContext.destination (系统扬声器)]
+```
+
+- **单例守卫**：同一个 `<video>` DOM 在整个生命周期中只能调用一次 `createMediaElementSource()`（重复调用会抛出 `InvalidStateError`）。采用 `initAudioPipeline()` + `audioPipelineReady` 幂等保护，切片换源绝不重建管线；
+- **防破音（Anti-Clipping）安全气囊**：串联 `DynamicsCompressorNode`，在音量放大逼近极限（-3dB）时自动柔和压缩波峰，防止高音破音、刺耳失真；
+- **自愈与降级**：每次应用音量时检测 `audioCtx.state === 'suspended'` 并自动 `resume()`；若环境不支持 Web Audio API 则无缝降级回原生 `0~100%` 控制；
+- **UI 增益警示**：音量超过 100%（进入超额放大区）时，滑块自动变为霓虹橙色（`#volume-range.boost`），提醒用户当前处于高增益状态。
+
 ---
 
 ## 三、版本变更明细
+
+### v1.4.2（2025-08）——200% 音量翻倍与防破音增益系统
+
+- **🔊 200% 音量超级增益（Audio Boost）**：
+  - 基于现代 Web Audio API 构建专属音频处理管线，彻底突破 HTML5 `<video>` 原生 100% 音量上限；
+  - 音量滑块、鼠标滚轮、方向键（`↑`/`↓`）、设置记忆全面支持 `0% ~ 200%` 调节；
+  - 针对微弱录音、老旧电影、网课录屏等过小音源，一键放大翻倍，人声清晰洪亮。
+- **🛡️ 硬件级防破音保护（Dynamics Compressor）**：
+  - 串联轻量级专业动态音频压缩器，充当防爆音"安全气囊"；
+  - 正常音量无损穿透，超大声波峰值逼近失真极限时自动柔和削峰，告别刺耳杂音与爆破音。
+- **🎨 视觉警示与体验打磨**：
+  - 音量滑块在超过 100% 后自动切换为醒目的**霓虹橙色**发光样式，视觉反馈清晰明确；
+  - 完美向下兼容旧版播放器存档配置。
 
 ### v1.4.1（当前工作区，未提交）——全量代码审查修复
 
