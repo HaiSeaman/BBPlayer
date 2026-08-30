@@ -105,9 +105,11 @@ let playlistView = 'list'; // 'list' | 'history'
 let currentFilePath = '';
 let hasRealPath = false; // 是否具有物理路径（决定是否记播放历史）
 let isSeeking = false;
-let controlsTimeout = null; // 标题栏 3 秒闲置隐藏计时器
+let titlebarIdleTimer = null; // 标题栏 3 秒闲置兜底计时器
+let titlebarHideTimer = null; // 标题栏移出感应区后的延迟隐藏计时器
 let controlsIdleTimer = null; // 底部功能栏 3 秒闲置兜底计时器
 const CONTROLS_HOTZONE_HEIGHT = 120; // 底部感应区高度（像素）：鼠标进入此范围功能栏才出现
+const TITLEBAR_HOTZONE_HEIGHT = 56; // 顶部感应区高度（像素）：标题栏 42px + 14px 余量，鼠标接近顶部即唤出
 let toastTimer = null;
 let clickTimer = null; // 单击/双击区分计时器
 let lastVolume = 1.0;
@@ -1537,7 +1539,7 @@ function renderSubtitlesAt(currentTime) {
 if (loadSubBtn) {
   loadSubBtn.addEventListener('click', async (e) => {
     e.stopPropagation();
-    subtitleMenu.classList.remove('show');
+    if (subtitleMenu) subtitleMenu.classList.remove('show');
     try {
       const filePath = await window.electronAPI.openSubtitleDialog();
       if (filePath) {
@@ -1758,7 +1760,11 @@ if (fullscreenBtn) fullscreenBtn.addEventListener('click', toggleFullscreen);
 // 双击视频区域切换全屏
 if (videoContainer) {
   videoContainer.addEventListener('dblclick', (e) => {
-    if (e.target.closest('#controls-overlay') || e.target.closest('#titlebar')) return;
+    // 只在真正的视频画面区双击才切换全屏：
+    // 控制条/标题栏/播放列表面板/续播提示/空状态都是交互区，双点击中它们不应触发全屏
+    if (e.target.closest('#controls-overlay') || e.target.closest('#titlebar') ||
+        e.target.closest('#playlist-panel') || e.target.closest('#resume-toast') ||
+        e.target.closest('#empty-state') || e.target.closest('#global-toast')) return;
     // 取消待触发的单击播放，避免双击时播放状态被翻转
     if (clickTimer) {
       clearTimeout(clickTimer);
@@ -1770,7 +1776,9 @@ if (videoContainer) {
 
 // 快捷键
 window.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT') return;
+  // 焦点在原生可交互控件上时，把按键交还给控件自身，避免与全局快捷键双重触发
+  // （典型场景：点击播放按钮后按钮保持焦点，再按 Space 会同时触发按钮 click 与全局 toggle）
+  if (e.target.closest && e.target.closest('input, button, textarea, select')) return;
   // 如果按下了 Ctrl / Alt / Command 等系统组合功能键，不触发内置快捷键
   if (e.ctrlKey || e.altKey || e.metaKey) return;
   switch (e.code) {
@@ -1817,8 +1825,11 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
-// === 底部功能栏：hover 唤出 / 移开即隐 / 3 秒闲置兜底 ===
+// === 自动隐藏控制：底部功能栏 / 顶部标题栏 ===
+// 统一契约：热区唤出 → 移开延时收起 → 播放中 3 秒闲置兜底；悬停本体或按住鼠标拖拽窗口时保持显示。
+// 差异：底部"移开即隐"（无延迟），顶部带 0.4s 延迟去抖，防止鼠标滑过顶部边缘时闪烁。
 
+// --- 底部功能栏 ---
 // 判断本次鼠标事件的目标是否落在功能栏本体上（含其向上弹出的子菜单，
 // 因为倍速/比例/字幕/播放模式菜单在 DOM 上都是 #controls-overlay 的后代）
 function isPointerOverControlBar(e) {
@@ -1835,15 +1846,54 @@ function hideControlsNow() {
   closeAllMenus();
 }
 
-// 标题栏保持原有规矩：全窗口 mousemove/click 唤出，播放中 3 秒无操作隐藏
+// --- 顶部标题栏 ---
+// 判断本次鼠标事件的目标是否落在标题栏本体上（窗口控制按钮区）
+function isPointerOverTitleBar(e) {
+  return !!(e && e.target && e.target.closest && e.target.closest('#titlebar'));
+}
+
+// 沉浸模式：有视频且在播放时才启用"自动隐藏"，空状态/暂停时标题栏常驻
+function isImmersiveMode() {
+  return !!(video && video.src && !video.paused);
+}
+
+// 立即收起标题栏（清掉一切相关计时器）
+function hideTitleBarNow() {
+  if (titlebarHideTimer) {
+    clearTimeout(titlebarHideTimer);
+    titlebarHideTimer = null;
+  }
+  if (titlebarIdleTimer) {
+    clearTimeout(titlebarIdleTimer);
+    titlebarIdleTimer = null;
+  }
+  if (titleBar) titleBar.classList.add('hide');
+}
+
+// 移出顶部感应区：延迟 0.4 秒再藏（防误触/防闪烁），期间鼠标回来会立即取消
+function scheduleHideTitleBar() {
+  if (titlebarHideTimer) return; // 已经挂着的延迟不重复计时
+  titlebarHideTimer = setTimeout(() => {
+    titlebarHideTimer = null;
+    hideTitleBarNow();
+  }, 400);
+}
+
+// 唤出标题栏；播放中启动 3 秒闲置兜底
 function showTitleBar() {
   if (titleBar) titleBar.classList.remove('hide');
-
-  if (controlsTimeout) clearTimeout(controlsTimeout);
-
-  if (!video.paused) {
-    controlsTimeout = setTimeout(() => {
-      if (titleBar) titleBar.classList.add('hide');
+  if (titlebarHideTimer) {
+    clearTimeout(titlebarHideTimer);
+    titlebarHideTimer = null;
+  }
+  if (titlebarIdleTimer) {
+    clearTimeout(titlebarIdleTimer);
+    titlebarIdleTimer = null;
+  }
+  if (isImmersiveMode()) {
+    titlebarIdleTimer = setTimeout(() => {
+      titlebarIdleTimer = null;
+      hideTitleBarNow();
     }, 3000);
   }
 }
@@ -1863,8 +1913,37 @@ function showControls() {
   }
 }
 
-// 每次鼠标移动时统一裁决功能栏的去留
+// 每次鼠标移动时统一裁决标题栏与功能栏的去留
 function updateControlsOnMouseMove(e) {
+  // 一次取容器布局矩形，顶部/底部热区共用。
+  // getBoundingClientRect() 会强制同步重排，而 mousemove 高频触发，
+  // 合并为一次可避免鼠标快速扫过时每帧触发两次布局计算。
+  const rect = videoContainer ? videoContainer.getBoundingClientRect() : null;
+
+  // --- 顶部标题栏 ---
+  // 鼠标悬停在标题栏本体上：一直保持显示，暂停一切隐藏计时（含按住鼠标拖拽窗口的场景）
+  if (isPointerOverTitleBar(e)) {
+    if (titleBar) titleBar.classList.remove('hide');
+    if (titlebarHideTimer) {
+      clearTimeout(titlebarHideTimer);
+      titlebarHideTimer = null;
+    }
+    if (titlebarIdleTimer) {
+      clearTimeout(titlebarIdleTimer);
+      titlebarIdleTimer = null;
+    }
+  } else if (isImmersiveMode() && rect) {
+    const inTopHotzone = (e.clientY - rect.top) <= TITLEBAR_HOTZONE_HEIGHT;
+
+    if (inTopHotzone) {
+      showTitleBar(); // 踩进顶部感应区：唤出（含 3 秒兜底）
+    } else if (!(e.buttons > 0) && titleBar && !titleBar.classList.contains('hide')) {
+      scheduleHideTitleBar(); // 已离开感应区且没按住鼠标：延迟收起
+      // 正在按住鼠标拖拽窗口时不隐藏，避免 -webkit-app-region: drag 区域中途消失导致拖拽脱手
+    }
+  }
+
+  // --- 底部功能栏 ---
   // 鼠标悬停在功能栏本体上：一直保持显示，不启动任何隐藏计时
   if (isPointerOverControlBar(e)) {
     if (controlBar) controlBar.classList.remove('hide');
@@ -1875,8 +1954,7 @@ function updateControlsOnMouseMove(e) {
     return;
   }
 
-  const rect = videoContainer.getBoundingClientRect();
-  const inHotzone = (rect.bottom - e.clientY) <= CONTROLS_HOTZONE_HEIGHT;
+  const inHotzone = rect ? (rect.bottom - e.clientY) <= CONTROLS_HOTZONE_HEIGHT : false;
 
   if (inHotzone) {
     showControls(); // 踩进底部感应区：唤出功能栏（含 3 秒兜底）
@@ -1887,10 +1965,13 @@ function updateControlsOnMouseMove(e) {
 
 if (videoContainer) {
   videoContainer.addEventListener('mousemove', (e) => {
-    showTitleBar();
     updateControlsOnMouseMove(e);
   });
-  videoContainer.addEventListener('click', showTitleBar);
+  // 点击画面唤出标题栏；播放列表等非画面交互区的点击不参与，避免列表操作时 UI 跳动
+  videoContainer.addEventListener('click', (e) => {
+    if (e.target.closest('#playlist-panel')) return;
+    showTitleBar();
+  });
 }
 
 // === 软件无边框顶部原生控件事件绑定 ===

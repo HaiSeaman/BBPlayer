@@ -27,25 +27,24 @@ BBPlayer/
 
 ## 二、关键机制说明
 
-### 1. 底部功能栏显隐状态机（v1.4 重做）
+### 1. 顶部标题栏与底部功能栏显隐状态机（v1.4.3 全面重做）
 
-标题栏与功能栏的显隐已拆分为两条独立线路：
+标题栏与功能栏均采用"智能热区感应 + 沉浸自适应"双轨机制：
 
 | 元素 | 唤出条件 | 隐藏条件 |
 |---|---|---|
-| 顶部标题栏 `#titlebar` | 全窗口任意 `mousemove` / `click` | 播放中 3 秒无操作 |
+| 顶部标题栏 `#titlebar` | 鼠标进入顶部感应区（`TITLEBAR_HOTZONE_HEIGHT`=56px）、或点击视频画面 | 离开顶部感应区且未按住鼠标拖动 → **延迟 0.4 秒隐藏**；或播放中 3 秒无操作（兜底）；**空状态与暂停时常驻** |
 | 底部功能栏 `#controls-overlay` | 鼠标进入底部感应区（离底边 ≤ `CONTROLS_HOTZONE_HEIGHT`=120px）或悬停其上 | 移开感应区且不在功能栏上 → **立即隐藏**；或播放中 3 秒无操作（兜底） |
 
-核心函数（renderer.js 尾部）：
+核心设计与状态控制函数（renderer.js 尾部）：
 
 - `updateControlsOnMouseMove(e)` — 每次 mousemove 统一裁决；
-- `isPointerOverControlBar(e)` — 用 `e.target.closest('#controls-overlay')` 判断悬停。
-  弹出菜单（倍速/比例/字幕/播放模式）在 DOM 上都是功能栏的后代，
-  因此鼠标挪进菜单不会被误判为"移开"——这是选择 closest 判断而非 mouseenter/leave 的原因；
-- 双计时器：`controlsTimeout`（标题栏）与 `controlsIdleTimer`（功能栏）互不干扰。
-
-设计取舍：感应区用**坐标判断**而非透明热区 div，避免热区拦截底部区域的单击暂停/双击全屏手势。
-单击视频画面只负责播放/暂停，不再唤出功能栏。
+  - **性能关键**：单次 mousemove 仅执行 1 次 `getBoundingClientRect()`，顶部与底部感应区共用 Rect，杜绝多次 Forced Reflow；
+- `isPointerOverControlBar(e)` — 用 `e.target.closest('#controls-overlay')` 判断功能栏悬停（包含其弹出子菜单）；
+- `isPointerOverTitleBar(e)` — 用 `e.target.closest('#titlebar')` 判断鼠标悬停或拖拽按住标题栏；
+- `isImmersiveMode()` — 判断是否处于沉浸模式（有视频且处于播放中状态）；非沉浸模式下标题栏强制常驻；
+- `scheduleHideTitleBar()` — 400ms 去抖延时隐藏，防止鼠标划过顶部边缘时剧烈闪烁；
+- 拖拽安全防护：`e.buttons !== 0` 且在标题栏上时不隐藏，确保无边框拖拽（`-webkit-app-region: drag`）不脱手。
 
 ### 2. 视频画面拖拽窗口 + 单击播放手势
 
@@ -136,6 +135,28 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 ---
 
 ## 三、版本变更明细
+
+### v1.4.3
+
+#### A. 顶部标题栏智能沉浸与交互重做（用户需求）
+
+1. **顶部热区感应**：新增 `TITLEBAR_HOTZONE_HEIGHT = 56`（42px 标题栏 + 14px 宽容余量），鼠标移入顶部感应区即唤出，移开延迟 0.4 秒（400ms 去抖缓冲）优雅隐藏，终结全窗口随处动鼠标即弹标题栏的打扰；
+2. **沉浸模式状态机 (`isImmersiveMode`)**：仅在视频处于播放（Playing）中才自动隐藏标题栏；暂停或未载入视频（空状态）时强制常驻，方便随时拖动窗口；
+3. **拖拽安全保护 (`isPointerOverTitleBar`)**：`e.buttons !== 0`（按住鼠标）且光标在标题栏上时绝对不隐藏，防止无边框拖动（`-webkit-app-region: drag`）中途脱手；
+4. **画面点击唤出**：保留视频画面点击唤出标题栏与 3 秒闲置兜底计时（`titlebarIdleTimer` / `titlebarHideTimer`），兼顾便携操作。
+
+#### B. 高频事件性能优化（消除强制同步重排）
+
+1. **合并布局查询**：`updateControlsOnMouseMove(e)` 内将顶部与底部热区判断原先各自调用的 `getBoundingClientRect()` 合并为单次调用，彻底消除鼠标高频滑动下的多次 Forced Reflow，降低渲染进程 CPU 占用。
+
+#### C. 细节与边界 BUG 修复
+
+1. **双击全屏边界修复**：`dblclick` 处理器排除列表新增 `#playlist-panel`、`#resume-toast`、`#empty-state`、`#global-toast`，严格限定仅视频纯画面区双击才触发全屏；
+2. **空格键双重翻转修复**：`keydown` 入口对焦点在 `input, button, textarea, select` 原生控件时直接放行，避免点击播放按钮后按空格同时触发原生 click 与全局 toggle 导致播停翻转两次；
+3. **播放列表点击联动隔离**：阻断在播放列表/历史抽屉内点选文件时的标题栏误唤出；
+4. **DOM 容错加固**：补充 `subtitleMenu` 判空等防御代码，清理 4 个构建残留 `.bak` 备份文件，重构理顺显隐控制状态机注释。
+
+---
 
 ### v1.4.2（2025-08）——200% 音量翻倍与防破音增益系统
 
