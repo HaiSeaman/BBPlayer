@@ -7,7 +7,9 @@ app.commandLine.appendSwitch('disable-background-networking');
 app.commandLine.appendSwitch('disable-breakpad');
 app.commandLine.appendSwitch('disable-extensions');
 
-let mainWindow = null;
+// === 多窗口支持：主窗口 + 若干“新窗口”弹窗，每个视频可独立窗口并发播放 ===
+let mainWindow = null; // 主窗口引用（second-instance 路由与窗口状态记忆使用）
+const playerWindows = new Set(); // 全部受信任播放器窗口（主窗口 + 新窗口弹窗），IPC 信任面
 
 const VIDEO_EXTS = require('./shared-video-exts');
 const videoExtensions = new Set(VIDEO_EXTS.map(ext => '.' + ext));
@@ -36,19 +38,16 @@ if (!gotTheLock) {
   app.quit();
 } else {
   app.on('second-instance', (event, commandLine) => {
-    // window-all-closed 时应用已退出，此处 mainWindow 必然存在
+    // 运行中再次打开视频文件：直接在独立新窗口播放，实现多视频同时播放；
+    // 无文件参数（如重复双击 exe）则聚焦现有主窗口
     const filePath = parseFilePathFromArgs(commandLine);
+    if (filePath) {
+      createPlayerWindow({ isMain: false, initialFile: filePath });
+      return;
+    }
     if (!mainWindow) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
-    if (filePath) {
-      // 渲染进程未就绪时先暂存，待 did-finish-load 后统一推送，避免消息丢失
-      if (mainWindow.webContents.isLoading()) {
-        initialFilePath = filePath;
-      } else {
-        mainWindow.webContents.send('open-file', filePath);
-      }
-    }
   });
 }
 
@@ -77,9 +76,13 @@ function loadWindowState() {
   return null;
 }
 
-function createWindow() {
-  const savedState = loadWindowState();
-  mainWindow = new BrowserWindow({
+// 播放器窗口工厂：主窗口与“新窗口”弹窗共用同一套无边框窗口/事件逻辑。
+// isMain 决定是否记忆窗口状态；initialFile 为弹窗指定立即播放的文件。
+function createPlayerWindow(options = {}) {
+  const { isMain = false, initialFile = null } = options;
+  const savedState = isMain ? loadWindowState() : null;
+
+  const win = new BrowserWindow({
     width: (savedState && savedState.width) || 1000,
     height: (savedState && savedState.height) || 650,
     x: savedState ? savedState.x : undefined,
@@ -100,136 +103,176 @@ function createWindow() {
     }
   });
 
-  mainWindow.loadFile('index.html');
+  // 新窗口默认在主窗口右下 40px 级联偏移，避免与主窗口完全重叠；
+  // 钳制在所在显示器工作区内，防止主窗口靠边/最大化时把新窗口挤出屏幕
+  if (!isMain) {
+    const ref = (mainWindow && !mainWindow.isDestroyed()) ? mainWindow.getBounds() : null;
+    if (ref) {
+      const [w, h] = win.getSize();
+      const wa = screen.getDisplayMatching(ref).workArea;
+      const x = Math.max(wa.x, Math.min(ref.x + 40, wa.x + wa.width - Math.min(w, wa.width)));
+      const y = Math.max(wa.y, Math.min(ref.y + 40, wa.y + wa.height - Math.min(h, wa.height)));
+      win.setPosition(Math.round(x), Math.round(y));
+    }
+  }
 
-  // 渲染进程加载完成后，若冷启动/运行中传入的文件尚未被取走则主动推送
-  mainWindow.webContents.on('did-finish-load', () => {
-    if (initialFilePath) {
-      mainWindow.webContents.send('open-file', initialFilePath);
+  // 纳入 IPC 信任面，窗口关闭时移除
+  playerWindows.add(win);
+  win.on('closed', () => {
+    playerWindows.delete(win);
+    if (isMain) mainWindow = null;
+  });
+
+  win.loadFile('index.html');
+
+  // 渲染进程加载完成后推送初始文件（弹窗直接播该文件；主窗口取冷启动/运行中传入的文件）
+  win.webContents.on('did-finish-load', () => {
+    if (initialFile) {
+      win.webContents.send('open-file', initialFile);
+    } else if (isMain && initialFilePath) {
+      win.webContents.send('open-file', initialFilePath);
       initialFilePath = null;
     }
   });
 
   // 安全防护：禁止页面打开新窗口与跳转外部导航
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  mainWindow.webContents.on('will-navigate', (e) => e.preventDefault());
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (e) => e.preventDefault());
 
   // 优雅加载
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
+  win.once('ready-to-show', () => {
+    win.show();
   });
 
-  // 监听窗口最小化与恢复事件
-  mainWindow.on('minimize', () => {
-    if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
-      mainWindow.webContents.send('window-minimized');
+  // 监听窗口最小化与恢复事件（渲染进程据此自动暂停/续播）
+  win.on('minimize', () => {
+    if (win && win.webContents && !win.webContents.isDestroyed()) {
+      win.webContents.send('window-minimized');
     }
   });
 
-  mainWindow.on('restore', () => {
-    if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
-      mainWindow.webContents.send('window-restored');
+  win.on('restore', () => {
+    if (win && win.webContents && !win.webContents.isDestroyed()) {
+      win.webContents.send('window-restored');
     }
   });
 
   // 用户手动拖拽窗口边缘时解除视频宽高比锁定（程序化 setSize 不触发 will-resize，
   // 因此换片自动贴合不受影响）；下次加载新视频时会重新锁定
-  mainWindow.on('will-resize', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.setAspectRatio(0);
+  win.on('will-resize', () => {
+    if (win && !win.isDestroyed()) {
+      win.setAspectRatio(0);
     }
   });
 
-  // 窗口大小/位置变化时保存状态（防抖，全屏时不记录）
-  let stateSaveTimer = null;
-  const scheduleStateSave = () => {
-    if (!mainWindow || mainWindow.isFullScreen()) return;
-    if (stateSaveTimer) clearTimeout(stateSaveTimer);
-    stateSaveTimer = setTimeout(() => {
-      try {
-        fs.writeFileSync(windowStateFile, JSON.stringify(mainWindow.getBounds()), 'utf8');
-      } catch (e) {
-        // 忽略写入失败
+  // 仅主窗口记忆窗口大小/位置（弹窗每次级联展开，不做持久化）
+  if (isMain) {
+    // 窗口大小/位置变化时保存状态（防抖，全屏时不记录）
+    let stateSaveTimer = null;
+    const scheduleStateSave = () => {
+      if (!win || win.isDestroyed() || win.isFullScreen()) return;
+      if (stateSaveTimer) clearTimeout(stateSaveTimer);
+      stateSaveTimer = setTimeout(() => {
+        try {
+          fs.writeFileSync(windowStateFile, JSON.stringify(win.getBounds()), 'utf8');
+        } catch (e) {
+          // 忽略写入失败
+        }
+      }, 400);
+    };
+    win.on('resize', scheduleStateSave);
+    win.on('move', scheduleStateSave);
+
+    // 关闭前取消挂起的防抖保存并强制落盘一次（避免最后一次移动/缩放丢失）
+    win.on('close', () => {
+      if (stateSaveTimer) {
+        clearTimeout(stateSaveTimer);
+        stateSaveTimer = null;
       }
-    }, 400);
-  };
-  mainWindow.on('resize', scheduleStateSave);
-  mainWindow.on('move', scheduleStateSave);
-
-  // 主窗口关闭事件处理
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  // 关闭前取消挂起的防抖保存并强制落盘一次（避免最后一次移动/缩放丢失）
-  mainWindow.on('close', () => {
-    if (stateSaveTimer) {
-      clearTimeout(stateSaveTimer);
-      stateSaveTimer = null;
-    }
-    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isFullScreen()) {
-      try {
-        fs.writeFileSync(windowStateFile, JSON.stringify(mainWindow.getBounds()), 'utf8');
-      } catch (e) {
-        // 忽略写入失败
+      if (win && !win.isDestroyed() && !win.isFullScreen()) {
+        try {
+          fs.writeFileSync(windowStateFile, JSON.stringify(win.getBounds()), 'utf8');
+        } catch (e) {
+          // 忽略写入失败
+        }
       }
-    }
-  });
+    });
+  }
+
+  return win;
 }
 
-// === IPC 安全防护：仅接受主窗口顶层渲染进程的调用 ===
+// 由 IPC 事件定位发起该调用的窗口（各播放器窗口相互独立）
+function windowOf(event) {
+  if (!event || !event.sender) return null;
+  const win = BrowserWindow.fromWebContents(event.sender);
+  return (win && !win.isDestroyed()) ? win : null;
+}
+
+// === IPC 安全防护：仅接受受信任播放器窗口的顶层渲染进程调用 ===
 function isTrustedSender(event) {
-  return !!(
-    mainWindow &&
-    mainWindow.webContents &&
-    !mainWindow.webContents.isDestroyed() &&
-    event &&
-    event.senderFrame &&
-    event.senderFrame === mainWindow.webContents.mainFrame
-  );
+  if (!event || !event.sender || !event.senderFrame) return false;
+  if (event.senderFrame !== event.sender.mainFrame) return false; // 仅接受顶层 frame
+  const win = windowOf(event);
+  return !!(win && playerWindows.has(win));
 }
 
 // 软件准备就绪
 app.whenReady().then(() => {
-  createWindow();
+  mainWindow = createPlayerWindow({ isMain: true });
 });
 
 app.on('window-all-closed', () => {
   app.quit();
 });
 
-// === IPC 原生窗口交互处理 ===
+// === IPC 原生窗口交互处理（作用于发起窗口自身，多窗口各自独立） ===
 ipcMain.on('window-minimize', (event) => {
   if (!isTrustedSender(event)) return;
-  if (mainWindow) mainWindow.minimize();
+  const win = windowOf(event);
+  if (win) win.minimize();
 });
 
 ipcMain.on('window-maximize', (event) => {
   if (!isTrustedSender(event)) return;
-  if (mainWindow) {
-    if (mainWindow.isMaximized()) {
-      mainWindow.unmaximize();
+  const win = windowOf(event);
+  if (win) {
+    if (win.isMaximized()) {
+      win.unmaximize();
     } else {
-      mainWindow.maximize();
+      win.maximize();
     }
   }
 });
 
 ipcMain.on('window-close', (event) => {
   if (!isTrustedSender(event)) return;
-  if (mainWindow) mainWindow.close();
+  const win = windowOf(event);
+  if (win) win.close();
 });
 
 // 真正的全屏切换（区别于窗口最大化）
 ipcMain.on('window-fullscreen', (event) => {
   if (!isTrustedSender(event)) return;
-  if (mainWindow) mainWindow.setFullScreen(!mainWindow.isFullScreen());
+  const win = windowOf(event);
+  if (win) win.setFullScreen(!win.isFullScreen());
 });
 
 // 查询当前是否处于全屏状态（供 Esc 退出全屏）
 ipcMain.handle('window:isFullScreen', (event) => {
   if (!isTrustedSender(event)) return false;
-  return mainWindow ? mainWindow.isFullScreen() : false;
+  const win = windowOf(event);
+  return win ? win.isFullScreen() : false;
+});
+
+// 在独立新窗口播放指定视频（多视频同时播放的核心入口）
+ipcMain.on('window:openInNewWindow', (event, filePath) => {
+  if (!isTrustedSender(event)) return;
+  if (typeof filePath !== 'string' || !filePath) return;
+  const abs = path.resolve(filePath);
+  const ext = path.extname(abs).toLowerCase();
+  if (!videoExtensions.has(ext) || !fs.existsSync(abs)) return;
+  createPlayerWindow({ isMain: false, initialFile: abs });
 });
 
 // 本地路径转 file:// URL（沙箱 preload 的 url 模块无 pathToFileURL，由主进程用完整标准库转换）
@@ -257,8 +300,9 @@ ipcMain.handle('app:getInitialFile', (event) => {
 
 // 打开本地视频文件对话框（支持多选）
 ipcMain.handle('dialog:openFile', async (event) => {
-  if (!mainWindow || !isTrustedSender(event)) return null;
-  const result = await dialog.showOpenDialog(mainWindow, {
+  const win = windowOf(event);
+  if (!win || !isTrustedSender(event)) return null;
+  const result = await dialog.showOpenDialog(win, {
     title: '选择本地视频文件',
     properties: ['openFile', 'multiSelections'],
     filters: [
@@ -274,8 +318,9 @@ ipcMain.handle('dialog:openFile', async (event) => {
 
 // 打开本地字幕文件对话框
 ipcMain.handle('dialog:openSubtitle', async (event) => {
-  if (!mainWindow || !isTrustedSender(event)) return null;
-  const result = await dialog.showOpenDialog(mainWindow, {
+  const win = windowOf(event);
+  if (!win || !isTrustedSender(event)) return null;
+  const result = await dialog.showOpenDialog(win, {
     title: '选择外挂字幕文件',
     properties: ['openFile'],
     filters: [
@@ -332,8 +377,9 @@ async function scanDirectorySafe(dirPath, currentDepth = 0, maxDepth = 3, maxFil
 }
 
 ipcMain.handle('dialog:openFolder', async (event) => {
-  if (!mainWindow || !isTrustedSender(event)) return null;
-  const result = await dialog.showOpenDialog(mainWindow, {
+  const win = windowOf(event);
+  if (!win || !isTrustedSender(event)) return null;
+  const result = await dialog.showOpenDialog(win, {
     title: '选择视频文件夹',
     properties: ['openDirectory']
   });
@@ -399,18 +445,22 @@ ipcMain.handle('file:readText', async (event, filePath) => {
     const buf = await fs.promises.readFile(filePath); // Buffer，交由解码器处理编码
     return decodeSubtitleBuffer(buf);
   } catch (err) {
-    console.error('读取字幕文件失败:', err);
+    // ENOENT 是"同名字幕不存在"的常规情况（自动加载字幕必经路径），无需告警
+    if (!err || err.code !== 'ENOENT') {
+      console.error('读取字幕文件失败:', err);
+    }
     return null;
   }
 });
 
 // 导出保存高清截图到本地文件（渲染进程固定以 ArrayBuffer 载荷传输，避免大图 base64 膨胀）
 ipcMain.handle('dialog:saveScreenshot', async (event, payload) => {
-  if (!mainWindow || !isTrustedSender(event)) return false;
+  const win = windowOf(event);
+  if (!win || !isTrustedSender(event)) return false;
   if (!payload || typeof payload !== 'object' || !(payload.data instanceof ArrayBuffer)) return false;
   const { data, defaultName } = payload;
 
-  const result = await dialog.showSaveDialog(mainWindow, {
+  const result = await dialog.showSaveDialog(win, {
     title: '保存视频画面截图',
     defaultPath: defaultName || 'BBPlayer_Screenshot.png',
     filters: [{ name: 'PNG 图片', extensions: ['png'] }]
@@ -431,21 +481,23 @@ ipcMain.handle('dialog:saveScreenshot', async (event, payload) => {
 // 监听渲染进程发来的视频分辨率，动态调整窗口大小与锁定宽高比（消除黑边）
 ipcMain.handle('resize-window-to-video', (event, payload) => {
   if (!isTrustedSender(event)) return false;
+  const win = windowOf(event);
+  if (!win) return false;
   if (!payload || typeof payload !== 'object') return false;
   const { width, height } = payload;
-  if (!mainWindow || typeof width !== 'number' || typeof height !== 'number' || !isFinite(width) || !isFinite(height)) return false;
+  if (typeof width !== 'number' || typeof height !== 'number' || !isFinite(width) || !isFinite(height)) return false;
   if (width <= 0 || height <= 0) return false;
 
   const aspectRatio = width / height;
 
   // 如果窗口处于全屏或最大化状态，不改变尺寸（比例锁保留，退出后仍贴合视频）
-  if (mainWindow.isFullScreen() || mainWindow.isMaximized()) {
-    mainWindow.setAspectRatio(aspectRatio);
+  if (win.isFullScreen() || win.isMaximized()) {
+    win.setAspectRatio(aspectRatio);
     return true;
   }
 
   // 支持多显示器环境：获取窗口当前所在的显示器
-  const currentBounds = mainWindow.getBounds();
+  const currentBounds = win.getBounds();
   const currentDisplay = screen.getDisplayMatching(currentBounds);
   const { workArea } = currentDisplay;
   const maxWidth = Math.round(workArea.width * 0.85);
@@ -471,20 +523,22 @@ ipcMain.handle('resize-window-to-video', (event, payload) => {
     }
   }
 
-  mainWindow.setAspectRatio(lockAspect ? aspectRatio : 0); // setAspectRatio(0) 取消锁定
-  mainWindow.setSize(targetWidth, targetHeight);
+  win.setAspectRatio(lockAspect ? aspectRatio : 0); // setAspectRatio(0) 取消锁定
+  win.setSize(targetWidth, targetHeight);
   return true;
 });
 
 // 处理渲染进程发送的动态移动窗口请求（约束在全部显示器并集内，避免拖出屏幕无法找回）
 ipcMain.on('window-move', (event, payload) => {
   if (!isTrustedSender(event)) return;
+  const win = windowOf(event);
+  if (!win) return;
   if (!payload || typeof payload !== 'object') return;
   const { x, y } = payload;
-  if (!mainWindow || typeof x !== 'number' || typeof y !== 'number') return;
-  if (mainWindow.isFullScreen()) return; // 全屏状态下禁止拖动窗口
+  if (typeof x !== 'number' || typeof y !== 'number') return;
+  if (win.isFullScreen()) return; // 全屏状态下禁止拖动窗口
 
-  const bounds = mainWindow.getBounds();
+  const bounds = win.getBounds();
   const displays = screen.getAllDisplays().map(d => d.workArea);
   const left = Math.min(...displays.map(d => d.x));
   const top = Math.min(...displays.map(d => d.y));
@@ -493,5 +547,5 @@ ipcMain.on('window-move', (event, payload) => {
   // 允许跨屏自由拖动，但窗口至少保留 40px 可抓取区域在所有屏幕并集内
   const nx = Math.min(Math.max(x, left - bounds.width + 40), right - 40);
   const ny = Math.min(Math.max(y, top), bottom - 40);
-  mainWindow.setPosition(Math.round(nx), Math.round(ny));
+  win.setPosition(Math.round(nx), Math.round(ny));
 });

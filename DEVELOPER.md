@@ -9,9 +9,9 @@
 
 ```
 BBPlayer/
-├── main.js               # Electron 主进程：窗口创建/状态记忆、IPC、文件对话框、目录扫描
+├── main.js               # Electron 主进程：多窗口工厂/状态记忆、IPC 信任面、文件对话框、目录扫描
 ├── preload.js            # 预加载脚本：contextBridge 暴露 electronAPI（渲染进程唯一系统入口）
-├── renderer.js           # 渲染层全部业务逻辑（约 1700 行，单文件策略）
+├── renderer.js           # 渲染层全部业务逻辑（约 2000 行，单文件策略，每窗口一份独立实例）
 ├── index.html            # 界面结构 + 全部内联 CSS（毛玻璃视觉，单文件免额外请求）
 ├── shared-video-exts.js  # 视频扩展名单一来源（主进程用）
 ├── run-test.bat          # 源码方式启动测试（自动检测 Node/Electron 环境）
@@ -71,10 +71,15 @@ BBPlayer/
 UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法字节即抛错）→ GBK 回退 → latin1 兜底。
 覆盖中文环境最常见的 ANSI(GBK) 老字幕。主进程读取有 10MB 上限（`MAX_SUBTITLE_BYTES`）。
 
-### 5. IPC 安全面
+### 5. IPC 安全面（v1.4.4 起为多窗口信任面）
 
-所有主进程 IPC 处理器经 `isTrustedSender()` 校验发送方为顶层主窗口 frame；
-字幕读取有扩展名白名单；`will-navigate` 与 `window-open` 已封死。
+所有主进程 IPC 处理器经 `isTrustedSender()` 校验发送方：
+- v1.4.4 前：仅接受顶层主窗口 frame；
+- **v1.4.4 起**：接受 `playerWindows` 集合内任意播放器窗口的顶层 frame。
+  集合在 `createPlayerWindow()` 创建时加入、`closed` 时移除；发送窗口由 `windowOf(event)`
+  （`BrowserWindow.fromWebContents(event.sender)`）定位。
+- 字幕读取有扩展名白名单 + 10MB 上限；`will-navigate` 与 `window-open` 已封死；
+- 新窗口播放入口 `window:openInNewWindow` 校验扩展名白名单 + `fs.existsSync`。
 
 ### 6. 持久化键（localStorage）
 
@@ -132,9 +137,71 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 - **自愈与降级**：每次应用音量时检测 `audioCtx.state === 'suspended'` 并自动 `resume()`；若环境不支持 Web Audio API 则无缝降级回原生 `0~100%` 控制；
 - **UI 增益警示**：音量超过 100%（进入超额放大区）时，滑块自动变为霓虹橙色（`#volume-range.boost`），提醒用户当前处于高增益状态。
 
+### 11. 多窗口架构（v1.4.4 新增）
+
+**目标**：多个视频在各自独立窗口同时播放（类似 PotPlayer/VLC 多开），每个窗口都是完整播放器。
+
+**核心设计**：
+
+1. **窗口工厂 `createPlayerWindow({ isMain, initialFile })`**：主窗口与新窗口弹窗共用同一套
+   无边框/沉浸/比例锁/最小化自动暂停逻辑。`isMain` 决定是否记忆窗口状态（仅主窗口持久化
+   bounds 到 `window-state.json`）；`initialFile` 让弹窗在 `did-finish-load` 后自动播放指定文件。
+2. **信任面 `playerWindows: Set`**：所有播放器窗口（含弹窗）加入该集合，`closed` 时移除；
+   IPC 处理器一律通过 `windowOf(event)` 定位**发起窗口自身**（最小化/最大化/关闭/全屏/
+   对话框/截图/窗口自适应缩放/移动），各窗口互不干扰。
+3. **弹窗级联偏移**：新窗口默认在主窗口右下 40px 级联展开，并钳制在所在显示器工作区内，
+   防止主窗口靠边/最大化时把弹窗挤出屏幕。
+4. **三条打开新窗口的入口**：
+   - 播放列表项悬停 **↗** 按钮 → `window:openInNewWindow(path)`；
+   - 播放列表头部外链按钮 → 把当前播放视频弹到新窗口；
+   - **运行中再次双击视频文件**（`second-instance`）→ 直接新窗口播放（v1.4.4 起，
+     旧行为是并入主窗口播放列表）。
+5. **窗口关闭语义**：主窗口关闭但弹窗仍在时应用不退出（`window-all-closed` 才 `app.quit()`）；
+   主窗口引用置空后，新弹窗级联退化为居中显示。
+6. **渲染进程独立性**：每个窗口各自加载一份 `index.html`/`renderer.js`，播放状态、
+   字幕引擎、音量增益管线（各自独立 AudioContext）完全隔离；`localStorage` 因同源 file://
+   共享，历史与设置跨窗口一致。
+7. **限制**：弹窗仅能打开**具备本地绝对路径**的视频（`canOpenInNewWindow` 判定盘符/UNC），
+   拖拽且无物理路径的 blob 临时文件无法在另一窗口播放，UI 会给出明确 Toast。
+
 ---
 
 ## 三、版本变更明细
+
+### v1.4.4
+
+#### A. 多窗口多视频同时播放（用户需求，核心功能）
+
+将播放器从"单窗口单视频"重构为"多窗口多视频"架构，每个窗口都是完整播放器：
+
+1. **窗口工厂 `createPlayerWindow({ isMain, initialFile })`**：主窗口与新窗口弹窗共用同一套
+   无边框/沉浸/比例锁/最小化自动暂停逻辑；仅主窗口持久化窗口状态，弹窗每次级联展开；
+2. **IPC 信任面泛化**：`playerWindows` 集合 + `windowOf()` 取代"仅主窗口"校验，
+   所有窗口控制/对话框/截图/自适应缩放/移动类 IPC 均作用于**发起窗口自身**，多窗口互不干扰；
+3. **新增 `window:openInNewWindow` IPC**：校验扩展名白名单与 `fs.existsSync` 后创建弹窗并自动播放；
+4. **三条新窗口入口**：播放列表项悬停 ↗ 按钮、播放列表头部"新窗口播放当前视频"按钮、
+   运行中再次双击视频文件（`second-instance`）直接新窗口播放；
+5. **弹窗级联偏移钳制**：默认主窗口右下 40px，并钳制在显示器工作区内（防靠边/最大化时挤出屏幕）；
+6. **多窗口语义**：主窗口关闭但弹窗仍在时不退出应用；弹窗可继续级联再开新窗口；
+   每个窗口独立渲染进程与独立 AudioContext，播放/字幕/音量完全隔离；
+   localStorage 同源共享，历史与设置跨窗口一致。
+
+#### B. 全量代码审查修复（性能 / 正确性 / 体验）
+
+覆盖 main.js / preload.js / renderer.js / index.html 的审查与优化（二次复查补修 1 项）：
+
+1. **ENOENT 字幕噪音静默**：同名字幕不存在是自动加载的常规路径，`file:readText` 不再为 ENOENT 打印错误栈；
+2. **进度条拖拽失焦兜底**：鼠标在窗口外松开时 `mouseup` 不触发，新增窗口 `blur` 清理监听，
+   避免 `isSeeking` 卡死导致进度/时间停止刷新；
+3. **播放状态令牌防护**：`loadAndPlayVideo` 中 `video.play()` 的异步回调增加 `loadSequence` 校验，
+   快速连播时旧视频回调不再覆盖新视频的播放状态 UI；
+4. **新窗口按钮兜底**：无本地绝对路径（拖拽 blob）的条目点"新窗口"时明确 Toast 提示，
+   不再被主进程静默忽略；
+5. **清空播放器图标复位**：`resetPlayerToEmpty()` 补调 `updatePlayPauseUI(false)`，
+   修复清空播放列表时残留"暂停"图标的问题；
+6. **安全加固**：新窗口入口、字幕读取路径等均保持扩展名白名单 + 存在性校验；
+7. **验证**：`node --check` 语法门禁 0 错误；实测冷启动播放、双窗口同时播放两个视频、
+   主进程日志全程零报错。
 
 ### v1.4.3
 

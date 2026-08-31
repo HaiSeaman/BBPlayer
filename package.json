@@ -1,6 +1,6 @@
 {
   "name": "bb-player",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "BBPlayer",
   "main": "main.js",
   "scripts": {
@@ -21,6 +21,7 @@
   "build": {
     "appId": "com.bb.player",
     "productName": "BBPlayer",
+    "publish": null,
     "directories": {
       "output": "release-dist"
     },

@@ -410,10 +410,12 @@ async function loadAndPlayVideo(filePathOrFile) {
   if (emptyState) emptyState.style.display = 'none';
   isVideoLoaded = true;
 
-  // 尝试自动播放
+  // 尝试自动播放（带令牌校验：快速连播时旧视频的异步回调不覆盖新视频的播放状态 UI）
   video.play().then(() => {
+    if (seq !== loadSequence) return;
     updatePlayPauseUI(true);
   }).catch((err) => {
+    if (seq !== loadSequence) return;
     console.warn('自动播放被阻断，等待手动触发:', err);
     updatePlayPauseUI(false);
   });
@@ -555,6 +557,29 @@ if (addFolderBtn) {
   addFolderBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     openFolderAndAdd();
+  });
+}
+
+// 判断是否具有可被新窗口打开的本地绝对路径（Windows 盘符或 UNC 网络路径）。
+// 拖拽且无物理路径的临时文件（blob 播放）无法在另一窗口打开，需提示用户
+function canOpenInNewWindow(p) {
+  return typeof p === 'string' && /^([a-zA-Z]:[\\/]|[\\/]{2})/.test(p);
+}
+
+// 在新窗口播放当前正在播放的视频（多视频同时播放）
+const btnNewWindow = document.getElementById('btn-new-window');
+if (btnNewWindow) {
+  btnNewWindow.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (!currentFilePath) {
+      showToast('当前没有正在播放的视频');
+      return;
+    }
+    if (!canOpenInNewWindow(currentFilePath)) {
+      showToast('该视频无本地路径，无法在新窗口播放');
+      return;
+    }
+    window.electronAPI.openInNewWindow(currentFilePath);
   });
 }
 
@@ -731,12 +756,19 @@ function renderPlaylist() {
     nameSpan.textContent = `${index + 1}. ${item.name}`;
     nameSpan.title = item.name;
 
+    // 在新窗口播放该视频（多视频同时播放）
+    const newWinBtn = document.createElement('span');
+    newWinBtn.className = 'new-win-btn';
+    newWinBtn.textContent = '↗';
+    newWinBtn.title = '在新窗口播放';
+
     const removeBtn = document.createElement('span');
     removeBtn.className = 'remove-btn';
     removeBtn.textContent = '✕';
     removeBtn.title = '从列表移除';
 
     div.appendChild(nameSpan);
+    div.appendChild(newWinBtn);
     div.appendChild(removeBtn);
     frag.appendChild(div);
   });
@@ -756,6 +788,16 @@ if (playlistItemsContainer) {
     if (e.target.classList.contains('remove-btn')) {
       e.stopPropagation();
       removePlaylistItem(index);
+    } else if (e.target.classList.contains('new-win-btn')) {
+      e.stopPropagation();
+      const item = playlist[index];
+      if (item && item.key) {
+        if (!canOpenInNewWindow(item.key)) {
+          showToast('该视频无本地路径，无法在新窗口播放');
+          return;
+        }
+        window.electronAPI.openInNewWindow(item.key);
+      }
     } else {
       playPlaylistItem(index);
     }
@@ -864,6 +906,7 @@ function resetPlayerToEmpty() {
   video.load();
   if (emptyState) emptyState.style.display = 'flex';
   isVideoLoaded = false;
+  updatePlayPauseUI(false); // 复位播放/暂停图标（清空时可能正处于播放中）
 }
 
 // 清空播放列表（历史视图下则清空观看历史）
@@ -1233,17 +1276,29 @@ if (progressContainer) {
       if (isSeeking) handleSeek(moveEvt);
     };
 
+    const cleanup = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+      window.removeEventListener('blur', onBlur);
+    };
+
     const onMouseUp = (upEvt) => {
       if (isSeeking) {
         handleSeek(upEvt);
         isSeeking = false;
       }
-      window.removeEventListener('mousemove', onMouseMove);
-      window.removeEventListener('mouseup', onMouseUp);
+      cleanup();
+    };
+
+    // 兜底：鼠标在窗口外松开时 mouseup 不会触发，失焦时复位，避免进度条/时间卡死不刷新
+    const onBlur = () => {
+      isSeeking = false;
+      cleanup();
     };
 
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
+    window.addEventListener('blur', onBlur);
   });
 }
 

@@ -68,6 +68,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return ipcRenderer.invoke('path-to-url', p).then((url) => url || '').catch(() => '');
   },
 
+  // 在独立新窗口播放指定视频（多视频同时播放）
+  openInNewWindow: (filePath) => ipcRenderer.send('window:openInNewWindow', filePath),
+
   // 动态调整窗口适应视频尺寸比例
   resizeToVideo: (videoSize) => ipcRenderer.invoke('resize-window-to-video', videoSize),
 
