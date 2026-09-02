@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -10,6 +10,54 @@ app.commandLine.appendSwitch('disable-extensions');
 // === 多窗口支持：主窗口 + 若干“新窗口”弹窗，每个视频可独立窗口并发播放 ===
 let mainWindow = null; // 主窗口引用（second-instance 路由与窗口状态记忆使用）
 const playerWindows = new Set(); // 全部受信任播放器窗口（主窗口 + 新窗口弹窗），IPC 信任面
+
+// === 系统托盘常驻模式：主窗口点"关闭"改为隐藏到托盘，音乐/视频均在后台继续（配合 backgroundThrottling:false） ===
+let tray = null; // 托盘实例（防 GC）
+let isQuitting = false; // 真正退出标志：为 true 时窗口 close 不再拦截（托盘菜单"关闭软件"与系统关机路径）
+
+// 显示/唤起主窗口（隐藏或最小化时恢复）；已销毁则重建
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    mainWindow = createPlayerWindow({ isMain: true });
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+// 创建系统托盘：单击图标弹出菜单（打开界面/关闭软件），双击图标直接打开界面
+function createTray() {
+  let icon = nativeImage.createFromPath(path.join(__dirname, 'build/icon.ico'));
+  if (icon.isEmpty()) icon = nativeImage.createFromPath(path.join(__dirname, 'build/icon.png'));
+  tray = new Tray(icon);
+  tray.setToolTip('BBPlayer 媒体播放器');
+  const menu = Menu.buildFromTemplate([
+    { label: '打开界面', click: () => showMainWindow() },
+    { type: 'separator' },
+    { label: '关闭软件', click: () => { isQuitting = true; app.quit(); } }
+  ]);
+  // Windows 上设置 context menu 后 click/double-click 事件不触发，故改手动弹出。
+  // 单击/双击区分：单击延迟 260ms 判定（等不及第二次点击才算单击），双击立即打开。
+  let trayClickTimer = null;
+  tray.on('click', () => {
+    if (trayClickTimer) { clearTimeout(trayClickTimer); trayClickTimer = null; return; } // 双击的第一次点击，先不动作
+    trayClickTimer = setTimeout(() => {
+      trayClickTimer = null;
+      tray.popUpContextMenu(menu);
+    }, 260);
+  });
+  tray.on('double-click', () => {
+    if (trayClickTimer) { clearTimeout(trayClickTimer); trayClickTimer = null; }
+    showMainWindow();
+  });
+  // 右键点击：Windows 托盘惯例，立即弹出菜单（右键无双击语义，不走延迟判定）
+  tray.on('right-click', () => {
+    if (trayClickTimer) { clearTimeout(trayClickTimer); trayClickTimer = null; } // 清掉左键挂起的延迟弹菜单
+    tray.popUpContextMenu(menu);
+  });
+  console.log('[BBPlayer] 系统托盘已就绪：左键单击弹菜单、双击打开界面，右键弹菜单；关闭主窗口将隐藏到托盘，可从托盘恢复或彻底退出');
+}
 
 const VIDEO_EXTS = require('./shared-video-exts');
 const videoExtensions = new Set(VIDEO_EXTS.map(ext => '.' + ext));
@@ -39,15 +87,13 @@ if (!gotTheLock) {
 } else {
   app.on('second-instance', (event, commandLine) => {
     // 运行中再次打开视频文件：直接在独立新窗口播放，实现多视频同时播放；
-    // 无文件参数（如重复双击 exe）则聚焦现有主窗口
+    // 无文件参数（如重复双击 exe）则唤起/显示主窗口（隐藏到托盘时也要重新显示）
     const filePath = parseFilePathFromArgs(commandLine);
     if (filePath) {
       createPlayerWindow({ isMain: false, initialFile: filePath });
       return;
     }
-    if (!mainWindow) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
+    showMainWindow();
   });
 }
 
@@ -99,6 +145,7 @@ function createPlayerWindow(options = {}) {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true, // 显式开启沙箱（preload 仅用 electron 受限子集：contextBridge/ipcRenderer/webUtils，均可用）
       backgroundThrottling: false // 后台播放不卡顿
     }
   });
@@ -157,6 +204,20 @@ function createPlayerWindow(options = {}) {
     }
   });
 
+  // 隐藏到托盘（主窗口点"关闭"）与重新显示：与最小化共用同一套暂停/续播策略——
+  // 渲染进程按当前模式决定：视频暂停、纯音频音乐继续后台播放
+  win.on('hide', () => {
+    if (win && win.webContents && !win.webContents.isDestroyed()) {
+      win.webContents.send('window-minimized');
+    }
+  });
+
+  win.on('show', () => {
+    if (win && win.webContents && !win.webContents.isDestroyed()) {
+      win.webContents.send('window-restored');
+    }
+  });
+
   // 用户手动拖拽窗口边缘时解除视频宽高比锁定（程序化 setSize 不触发 will-resize，
   // 因此换片自动贴合不受影响）；下次加载新视频时会重新锁定
   win.on('will-resize', () => {
@@ -183,8 +244,15 @@ function createPlayerWindow(options = {}) {
     win.on('resize', scheduleStateSave);
     win.on('move', scheduleStateSave);
 
-    // 关闭前取消挂起的防抖保存并强制落盘一次（避免最后一次移动/缩放丢失）
-    win.on('close', () => {
+    // 主窗口"关闭"行为=隐藏到托盘（常驻后台，音乐/视频继续播放）；
+    // 仅当 isQuitting（托盘"关闭软件"或系统关机）时才真正关闭并落盘窗口状态
+    win.on('close', (e) => {
+      if (!isQuitting) {
+        e.preventDefault();
+        win.hide();
+        return;
+      }
+      // 真正退出：取消挂起的防抖保存并强制落盘一次（避免最后一次移动/缩放丢失）
       if (stateSaveTimer) {
         clearTimeout(stateSaveTimer);
         stateSaveTimer = null;
@@ -192,7 +260,7 @@ function createPlayerWindow(options = {}) {
       if (win && !win.isDestroyed() && !win.isFullScreen()) {
         try {
           fs.writeFileSync(windowStateFile, JSON.stringify(win.getBounds()), 'utf8');
-        } catch (e) {
+        } catch (err) {
           // 忽略写入失败
         }
       }
@@ -217,13 +285,21 @@ function isTrustedSender(event) {
   return !!(win && playerWindows.has(win));
 }
 
+// 真正退出前放行窗口关闭（托盘菜单"关闭软件"、系统关机/注销都会走到这里）
+app.on('before-quit', () => {
+  isQuitting = true;
+});
+
 // 软件准备就绪
 app.whenReady().then(() => {
   mainWindow = createPlayerWindow({ isMain: true });
+  createTray();
 });
 
 app.on('window-all-closed', () => {
-  app.quit();
+  // 仅在真正退出流程（托盘"关闭软件"/系统关机）时结束进程；
+  // 平时即使窗口全部意外关闭也保持托盘常驻，用户可从托盘"打开界面"重建主窗口
+  if (isQuitting) app.quit();
 });
 
 // === IPC 原生窗口交互处理（作用于发起窗口自身，多窗口各自独立） ===
@@ -281,6 +357,9 @@ const { pathToFileURL } = require('url');
 ipcMain.handle('path-to-url', (event, filePath) => {
   let url = '';
   if (isTrustedSender(event) && typeof filePath === 'string' && filePath) {
+    // 与 window:openInNewWindow 一致的白名单 + 存在性校验：只允许把受支持的媒体文件转成 file:// URL
+    const ext = path.extname(filePath).toLowerCase();
+    if (!videoExtensions.has(ext) || !fs.existsSync(filePath)) return '';
     try {
       url = pathToFileURL(filePath).href;
     } catch (err) {
@@ -288,6 +367,29 @@ ipcMain.handle('path-to-url', (event, filePath) => {
     }
   }
   return url;
+});
+
+// 查找音频文件同目录的封面图：cover/folder 惯例命名 + 同名图片，命中返回 file:// URL，未命中返回 null。
+// 渲染进程（沙箱）无法直接读目录，故由主进程完成；文件名取自固定惯例与自身 basename，无路径注入风险。
+const COVER_FILENAMES = ['cover.jpg', 'cover.jpeg', 'cover.png', 'cover.webp', 'folder.jpg', 'folder.png', 'front.jpg', 'front.png'];
+ipcMain.handle('file:findCover', (event, filePath) => {
+  if (!isTrustedSender(event)) return null;
+  if (typeof filePath !== 'string' || !filePath) return null;
+  try {
+    const abs = path.resolve(filePath);
+    const dir = path.dirname(abs);
+    const base = path.basename(abs, path.extname(abs));
+    const candidates = COVER_FILENAMES.concat([base + '.jpg', base + '.jpeg', base + '.png', base + '.webp']);
+    for (const name of candidates) {
+      const p = path.join(dir, name);
+      if (fs.existsSync(p) && fs.statSync(p).isFile()) {
+        return pathToFileURL(p).href;
+      }
+    }
+  } catch (err) {
+    console.warn('查找封面失败:', filePath, err);
+  }
+  return null;
 });
 
 // 获取应用冷启动时传入的文件路径
@@ -303,10 +405,11 @@ ipcMain.handle('dialog:openFile', async (event) => {
   const win = windowOf(event);
   if (!win || !isTrustedSender(event)) return null;
   const result = await dialog.showOpenDialog(win, {
-    title: '选择本地视频文件',
+    title: '选择本地媒体文件',
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: '视频文件', extensions: VIDEO_EXTS },
+      { name: '媒体文件', extensions: VIDEO_EXTS },
+      { name: '音频文件', extensions: ['mp3', 'flac', 'wav', 'ogg', 'm4a', 'aac'] },
       { name: '所有文件', extensions: ['*'] }
     ]
   });
@@ -459,10 +562,16 @@ ipcMain.handle('dialog:saveScreenshot', async (event, payload) => {
   if (!win || !isTrustedSender(event)) return false;
   if (!payload || typeof payload !== 'object' || !(payload.data instanceof ArrayBuffer)) return false;
   const { data, defaultName } = payload;
+  // 默认文件名校验：仅接受纯文件名（去路径分隔符），防止恶意名字带目录穿越进默认保存路径
+  let safeName = 'BBPlayer_Screenshot.png';
+  if (typeof defaultName === 'string' && defaultName) {
+    const base = defaultName.replace(/[\\/]/g, '_').trim();
+    if (base) safeName = base;
+  }
 
   const result = await dialog.showSaveDialog(win, {
     title: '保存视频画面截图',
-    defaultPath: defaultName || 'BBPlayer_Screenshot.png',
+    defaultPath: safeName,
     filters: [{ name: 'PNG 图片', extensions: ['png'] }]
   });
 

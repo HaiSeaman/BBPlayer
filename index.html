@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; media-src 'self' file: blob:; img-src 'self' data: blob:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; media-src 'self' file: blob:; img-src 'self' file: data: blob:;">
   <title>BBPlayer</title>
   <style>
     :root {
@@ -90,6 +90,97 @@
       height: 100%;
       object-fit: contain;
       background-color: #000;
+    }
+
+    /* 纯音频音乐播放效果层 - 盖住无画面的 video，位于字幕层(15)之下、控制栏(20)之下。
+     设计：封面主色环境光（每首歌背景随封面变化），居中垂直排版，频谱沉底。 */
+    #music-visualizer {
+      position: absolute;
+      inset: 0;
+      z-index: 10;
+      display: none; /* JS 在音乐模式下切换为 flex */
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(ellipse 130% 95% at 50% 22%, #151f38 0%, #0b1322 58%, #060a13 100%);
+      overflow: hidden;
+      pointer-events: none;
+      transition: background 0.7s ease;
+    }
+
+    /* 封面卡片：大圆角 + 环境光晕（色值由 JS 从封面采样写入 --cover-glow） */
+    .music-cover-frame {
+      width: min(34vh, 280px);
+      height: min(34vh, 280px);
+      border-radius: 22px;
+      box-shadow:
+        0 26px 70px rgba(0, 0, 0, 0.55),
+        0 0 90px var(--cover-glow, rgba(64, 128, 255, 0.2)),
+        0 0 0 1px rgba(255, 255, 255, 0.07);
+      background: rgba(255, 255, 255, 0.045);
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+
+    #music-cover-img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: none; /* 找到封面时 JS 置 block */
+    }
+
+    #music-cover-fallback {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, rgba(0, 242, 254, 0.14), rgba(79, 172, 254, 0.14));
+      color: rgba(255, 255, 255, 0.5);
+    }
+    #music-cover-fallback svg {
+      width: 92px;
+      height: 92px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    #music-title {
+      max-width: 82%;
+      margin: 28px 0 0;
+      font-size: clamp(20px, 3.2vh, 30px);
+      font-weight: 650;
+      letter-spacing: 0.5px;
+      color: #edf3ff;
+      text-align: center;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      text-shadow: 0 2px 16px rgba(0, 0, 0, 0.72);
+    }
+
+    /* 元信息行：格式 · 时长（由 JS 填充） */
+    .music-meta {
+      margin-top: 12px;
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: 1.6px;
+      color: rgba(198, 214, 240, 0.52);
+      text-transform: uppercase;
+    }
+
+    /* 频谱沉底横贯，细柱克制 */
+    #music-spectrum {
+      position: absolute;
+      bottom: 7%;
+      left: 50%;
+      transform: translateX(-50%);
+      width: min(64%, 720px);
+      height: 64px;
+      opacity: 0.92;
     }
 
     /* 外挂字幕显示区 */
@@ -787,6 +878,23 @@
     <!-- 视频渲染 DOM -->
     <video id="main-video"></video>
 
+    <!-- 纯音频音乐播放效果层（频谱可视化 + 封面 + 歌名） -->
+    <div id="music-visualizer">
+      <div class="music-cover-frame">
+        <img id="music-cover-img" alt="专辑封面" />
+        <div id="music-cover-fallback">
+          <svg viewBox="0 0 24 24">
+            <path d="M9 18V5l12-2v13"/>
+            <circle cx="6" cy="18" r="3"/>
+            <circle cx="18" cy="16" r="3"/>
+          </svg>
+        </div>
+      </div>
+      <h2 class="music-title" id="music-title">未命名曲目</h2>
+      <div class="music-meta" id="music-meta"></div>
+      <canvas id="music-spectrum"></canvas>
+    </div>
+
     <!-- 自定义外挂字幕渲染区 -->
     <div id="custom-subtitle-overlay">
       <span id="custom-subtitle-text" style="display: none;"></span>
@@ -919,7 +1027,7 @@
 
           <!-- 画面比例控制 -->
           <div class="menu-popover-container">
-            <button class="ctrl-btn text-btn" id="btn-aspect" title="画面比例">16:9</button>
+            <button class="ctrl-btn text-btn" id="btn-aspect" title="画面比例">自动</button>
             <div class="popover-menu" id="aspect-menu">
               <div class="menu-item active" data-aspect="auto">自动比例</div>
               <div class="menu-item" data-aspect="16-9">16 : 9</div>

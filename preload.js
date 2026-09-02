@@ -1,9 +1,10 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
-// 视频扩展名列表：沙箱渲染进程无法 require 本地模块，故在此内联。
+// 媒体扩展名列表（视频 + 音频）：沙箱渲染进程无法 require 本地模块，故在此内联。
 // 修改时务必同步 shared-video-exts.js（主进程用）与 package.json 的 fileAssociations。
 const VIDEO_EXTS = [
   'mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv', 'm4v', 'ts',
-  'rmvb', 'rm', '3gp', 'mpg', 'mpeg', 'm2ts', 'vob', 'ogv', 'f4v', 'm2v'
+  'rmvb', 'rm', '3gp', 'mpg', 'mpeg', 'm2ts', 'vob', 'ogv', 'f4v', 'm2v',
+  'mp3', 'flac', 'wav', 'ogg', 'm4a', 'aac'
 ];
 
 // 幂等事件订阅：重复调用同一 API 时先解绑旧监听器，避免回调累积重复触发
@@ -67,6 +68,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     if (typeof p !== 'string' || !p) return Promise.resolve('');
     return ipcRenderer.invoke('path-to-url', p).then((url) => url || '').catch(() => '');
   },
+
+  // 查找音频文件同目录的封面图（cover.jpg/folder.jpg/同名图片），返回 file:// URL 或 null
+  findCover: (filePath) => ipcRenderer.invoke('file:findCover', filePath),
 
   // 在独立新窗口播放指定视频（多视频同时播放）
   openInNewWindow: (filePath) => ipcRenderer.send('window:openInNewWindow', filePath),

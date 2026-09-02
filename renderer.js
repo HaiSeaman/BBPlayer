@@ -16,10 +16,11 @@ window.electronAPI.onOpenFile((filePath) => {
   }
 });
 
-// 窗口最小化自动暂停与恢复（不弹提示：最小化时用户看不到 Toast，恢复时安静续播即可）
+// 窗口最小化自动暂停（仅视频）与恢复（不弹提示：最小化时用户看不到 Toast，恢复时安静续播即可）
+// 纯音频音乐模式例外：最小化不暂停，让音乐在后台继续播放（背景节流已由 backgroundThrottling:false 关闭）
 let wasPlayingBeforeMinimize = false;
 window.electronAPI.onWindowMinimized(() => {
-  if (video && !video.paused && isVideoLoaded) {
+  if (video && !video.paused && isVideoLoaded && !isMusicMode) {
     wasPlayingBeforeMinimize = true;
     video.pause();
     updatePlayPauseUI(false);
@@ -82,6 +83,14 @@ const durationEl = document.getElementById('duration-time');
 // 外挂字幕容器
 const customSubtitle = document.getElementById('custom-subtitle-text');
 
+// === 纯音频音乐播放效果层 DOM ===
+const musicVisualizer = document.getElementById('music-visualizer');
+const musicCoverImg = document.getElementById('music-cover-img');
+const musicCoverFallback = document.getElementById('music-cover-fallback');
+const musicTitleEl = document.getElementById('music-title');
+const musicMetaEl = document.getElementById('music-meta');
+const musicSpectrumCanvas = document.getElementById('music-spectrum');
+
 // === 软件标题栏及控件名称显示 ===
 const videoTitleEl = document.getElementById('video-title');
 let currentSubtitleFontSize = 22;
@@ -121,6 +130,21 @@ let currentSpeed = 1.0;
 let currentRotation = 0; // 顺时针旋转角度：0 / 90 / 180 / 270
 let playMode = 'list-loop'; // 'list-loop' (全部视频循环) | 'random' (全部视频随机) | 'single-loop' (单个视频循环)
 
+// === 纯音频音乐模式状态 ===
+// 音频扩展名（与 shared-video-exts.js / preload.js 保持一致；注意 m4v 是视频，别混进来）
+const AUDIO_EXTS = new Set(['mp3', 'flac', 'wav', 'ogg', 'm4a', 'aac']);
+let isMusicMode = false;        // 当前是否处于"纯音频音乐播放效果"模式
+let musicAnimFrame = null;      // 频谱动画 requestAnimationFrame 句柄
+let musicCoverToken = 0;        // 封面异步加载令牌：换歌后旧封面结果作废
+
+// 判断是否为音频扩展名（用于跳字幕查找等同步分支）
+function isAudioExt(p) {
+  if (!p || typeof p !== 'string') return false;
+  const dot = p.lastIndexOf('.');
+  if (dot < 0) return false;
+  return AUDIO_EXTS.has(p.substring(dot + 1).toLowerCase());
+}
+
 // === 音量增益管线（Web Audio：音量可放大到 0%~200%，带防破音保护） ===
 // 原理：在 <video> 与扬声器之间加装“数字功放”。video.volume 被系统限制在 0~1（0%~100%），
 // 但 GainNode 放大倍率无上限，可把音频信号物理放大到 200% 甚至更高。
@@ -128,6 +152,7 @@ let audioCtx = null;
 let gainNode = null;
 let audioPipelineReady = false; // 增益管线是否可用（初始化失败则回退原生音量 0~100%）
 let masterVolume = 1.0;         // 用户音量 0.0 ~ 2.0：0~1 原生区，1~2 增益放大区
+let analyserNode = null;        // 频谱分析器（从管线分路读取实时频率数据，供音乐模式可视化）
 
 // 惰性初始化音频增益管线。铁律：同一个 <video> 一生只能绑定一次 MediaElementSource，
 // 重复绑定会抛错，因此必须保证本函数只成功执行一次（换片/切歌时绝不重建）。
@@ -146,7 +171,13 @@ function initAudioPipeline() {
     gainNode = audioCtx.createGain();
     gainNode.gain.value = 1.0;
 
-    // 3) 防破音动态压缩器（安全气囊）：常规音量（峰值低于 -3dB）完全不受影响，
+    // 3.5) 频谱分析器（只读分流，不改变音质）：接在增益后、压缩前，
+    //     可视化数据反映用户实际听到的（含增益效果）信号
+    analyserNode = audioCtx.createAnalyser();
+    analyserNode.fftSize = 256;                 // 128 个频率桶，足够绘制细腻频谱
+    analyserNode.smoothingTimeConstant = 0.82;  // 时间平滑：柱子过渡更柔和自然
+
+    // 4) 防破音动态压缩器（安全气囊）：常规音量（峰值低于 -3dB）完全不受影响，
     //    一旦放大后接近 0dB 峰值，自动柔和削平毛刺，防止喇叭“滋啦”破音。
     const compressor = audioCtx.createDynamicsCompressor();
     compressor.threshold.setValueAtTime(-3, audioCtx.currentTime);
@@ -155,9 +186,10 @@ function initAudioPipeline() {
     compressor.attack.setValueAtTime(0.002, audioCtx.currentTime);
     compressor.release.setValueAtTime(0.1, audioCtx.currentTime);
 
-    // 4) 串联管线：视频源 -> 增益放大器 -> 防破音压缩器 -> 扬声器
+    // 5) 串联管线：视频源 -> 增益放大器 -> 频谱分析器 -> 防破音压缩器 -> 扬声器
     sourceNode.connect(gainNode);
-    gainNode.connect(compressor);
+    gainNode.connect(analyserNode);
+    analyserNode.connect(compressor);
     compressor.connect(audioCtx.destination);
 
     audioPipelineReady = true;
@@ -170,6 +202,164 @@ function initAudioPipeline() {
     audioPipelineReady = false;
     return false;
   }
+}
+
+// === 纯音频音乐播放效果：频谱动画 + 封面 + 歌名 ===
+// 频谱数据来源：initAudioPipeline 创建的 analyserNode（只读分流，不影响音量/防破音链路）。
+
+// 按当前窗口尺寸重新铺设频谱画布（含高分屏清晰度补偿）
+function setupSpectrumCanvas() {
+  if (!musicSpectrumCanvas || !musicVisualizer) return;
+  const rect = musicVisualizer.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.min(rect.width * 0.64, 720);
+  const h = 64;
+  musicSpectrumCanvas.style.width = w + 'px';
+  musicSpectrumCanvas.style.height = h + 'px';
+  musicSpectrumCanvas.width = Math.round(w * dpr);
+  musicSpectrumCanvas.height = Math.round(h * dpr);
+}
+
+// 绘制一帧频谱柱状图（32 根细渐变圆角柱，青→紫，顶部亮、底部融入背景）
+function drawSpectrumFrame() {
+  if (!isMusicMode) { musicAnimFrame = null; return; }
+  if (video.paused) {
+    // 暂停即停：清空画布（干净利落），不再空转耗电
+    musicAnimFrame = null;
+    if (musicSpectrumCanvas && musicSpectrumCanvas.width > 0) {
+      const c2 = musicSpectrumCanvas.getContext('2d');
+      if (c2) c2.clearRect(0, 0, musicSpectrumCanvas.width, musicSpectrumCanvas.height);
+    }
+    return;
+  }
+  const ctx = musicSpectrumCanvas && musicSpectrumCanvas.getContext('2d');
+  if (!ctx || !analyserNode) { musicAnimFrame = null; return; }
+  const W = musicSpectrumCanvas.width;
+  const H = musicSpectrumCanvas.height;
+  if (!W || !H) { musicAnimFrame = null; return; }
+
+  const bins = new Uint8Array(analyserNode.frequencyBinCount);
+  analyserNode.getByteFrequencyData(bins);
+
+  const barCount = 32;
+  // 只取低频到中频段（前 96 桶），人耳最敏感、视觉最"音乐"
+  const usable = Math.min(bins.length, 96);
+  const step = Math.max(1, Math.floor(usable / barCount));
+
+  ctx.clearRect(0, 0, W, H);
+  const gap = Math.max(2, W * 0.008);
+  const bw = (W - gap * (barCount - 1)) / barCount;
+
+  for (let i = 0; i < barCount; i++) {
+    let sum = 0;
+    for (let j = 0; j < step; j++) sum += bins[Math.min(i * step + j, bins.length - 1)];
+    const v = (sum / step) / 255;
+    // 底部留出低亮"基座"，柱子最高 88% 高度
+    const bh = Math.max(3, v * H * 0.88);
+    const x = i * (bw + gap);
+    const hue = 190 + (i / barCount) * 80; // 190(青) → 270(紫)
+    const grad = ctx.createLinearGradient(0, H - bh, 0, H);
+    grad.addColorStop(0, `hsla(${hue}, 95%, 66%, 0.95)`);  // 柱顶亮
+    grad.addColorStop(1, `hsla(${hue}, 95%, 62%, 0.10)`);  // 柱底融入背景
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.roundRect(x, H - bh, bw, bh, Math.min(bw / 2, 2.5));
+    ctx.fill();
+  }
+
+  musicAnimFrame = requestAnimationFrame(drawSpectrumFrame);
+}
+
+// 从封面图采样主色，把背景渐变与环境光晕染成歌的主色调（Ambient 风格）。
+// file:// 页面下 canvas 读本地图一般允许；万一被污染/受限，catch 后保留默认深色背景，绝不崩。
+function applyCoverGlow(imgEl) {
+  if (!musicVisualizer || !imgEl) return;
+  try {
+    const probe = document.createElement('canvas');
+    probe.width = probe.height = 24;
+    const ctx = probe.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return;
+    ctx.drawImage(imgEl, 0, 0, 24, 24);
+    const d = ctx.getImageData(0, 0, 24, 24).data;
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
+    if (!n) return;
+    r = Math.round(r / n); g = Math.round(g / n); b = Math.round(b / n);
+    // 背景用压暗 45% 的主色做光源；光晕直接用主色半透明
+    musicVisualizer.style.background =
+      `radial-gradient(ellipse 130% 95% at 50% 22%, rgb(${(r * 0.55) | 0},${(g * 0.55) | 0},${(b * 0.55) | 0}) 0%, #101a30 58%, #070b16 100%)`;
+    musicVisualizer.style.setProperty('--cover-glow', `rgba(${r},${g},${b},0.35)`);
+  } catch (err) {
+    // 忽略：保留默认背景
+  }
+}
+
+// 切换进入音乐模式：显示效果层、铺设画布、隐藏音频无意义的按钮、异步加载封面
+async function enterMusicMode(filePath, displayName) {
+  isMusicMode = true;
+  if (musicVisualizer) {
+    musicVisualizer.style.display = 'flex';
+    setupSpectrumCanvas();
+  }
+  if (musicTitleEl) musicTitleEl.textContent = displayName || '未命名曲目';
+
+  // 元信息行：格式 · 时长（loadedmetadata 后 duration 已可用）
+  if (musicMetaEl) {
+    const ext = (typeof filePath === 'string' && filePath.includes('.'))
+      ? filePath.split('.').pop().toUpperCase() : '';
+    const dur = (Number.isFinite(video.duration) && video.duration > 0) ? formatTime(video.duration) : '';
+    musicMetaEl.textContent = [ext, dur].filter(Boolean).join(' · ');
+  }
+
+  // 音频没有画面可截、没有字幕可挂：隐藏相关按钮并收起字幕菜单
+  if (subtitleBtn) subtitleBtn.style.display = 'none';
+  if (screenshotBtn) screenshotBtn.style.display = 'none';
+  if (subtitleMenu) subtitleMenu.classList.remove('show');
+
+  // 封面：异步查找，令牌防串台（快速切歌时旧封面不覆盖新歌）
+  const token = ++musicCoverToken;
+  let coverUrl = null;
+  if (filePath) {
+    try { coverUrl = await window.electronAPI.findCover(filePath); } catch (err) { coverUrl = null; }
+  }
+  if (token !== musicCoverToken) return; // 已切换到别的媒体，丢弃本次结果
+  if (coverUrl && musicCoverImg) {
+    const myToken = token;
+    musicCoverImg.onload = () => {
+      if (myToken !== musicCoverToken) return; // 旧歌封面晚到：丢弃，不覆盖新歌
+      musicCoverImg.style.display = 'block';
+      if (musicCoverFallback) musicCoverFallback.style.display = 'none';
+      applyCoverGlow(musicCoverImg);
+    };
+    musicCoverImg.onerror = () => {
+      if (myToken !== musicCoverToken) return;
+      musicCoverImg.style.display = 'none';
+      if (musicCoverFallback) musicCoverFallback.style.display = 'flex';
+    };
+    musicCoverImg.src = coverUrl;
+  } else {
+    if (musicCoverImg) musicCoverImg.style.display = 'none';
+    if (musicCoverFallback) musicCoverFallback.style.display = 'flex';
+    // 无封面：恢复默认深色背景，避免残留上一首的环境光染色
+    if (musicVisualizer) {
+      musicVisualizer.style.background = '';
+      musicVisualizer.style.removeProperty('--cover-glow');
+    }
+  }
+
+  // 若正在播放，立即启动频谱动画（暂停状态等 play 事件再启动）
+  if (!video.paused && !musicAnimFrame) drawSpectrumFrame();
+}
+
+// 退出音乐模式（切回视频或清空播放器）：隐藏效果层、停动画、恢复按钮
+function exitMusicMode() {
+  isMusicMode = false;
+  musicCoverToken++; // 作废未落地的封面加载
+  if (musicAnimFrame) { cancelAnimationFrame(musicAnimFrame); musicAnimFrame = null; }
+  if (musicVisualizer) musicVisualizer.style.display = 'none';
+  if (subtitleBtn) subtitleBtn.style.display = '';
+  if (screenshotBtn) screenshotBtn.style.display = '';
 }
 
 // 统一应用音量：masterVolume 范围 0~2。
@@ -217,7 +407,7 @@ function formatTime(seconds) {
 
 // 倍速显示统一格式：整数保留一位小数（1.0x），非整数原样（1.25x），避免 toFixed(1) 把 1.25 显示成 1.3x
 function formatSpeed(speed) {
-  return `${Number.isInteger(speed * 10) ? (speed * 10 / 10).toFixed(1) : String(speed)}x`;
+  return `${Number.isInteger(speed * 10) ? speed.toFixed(1) : String(speed)}x`;
 }
 
 // 轻提示 Toast 弹窗（连续调用时重置计时器，避免提前消失）
@@ -375,7 +565,7 @@ async function loadAndPlayVideo(filePathOrFile) {
   if (seq !== loadSequence) return;
 
   if (!targetSrc) {
-    showToast('无法解析视频源');
+    showToast('无法解析媒体源');
     return;
   }
 
@@ -413,6 +603,8 @@ async function loadAndPlayVideo(filePathOrFile) {
   // 尝试自动播放（带令牌校验：快速连播时旧视频的异步回调不覆盖新视频的播放状态 UI）
   video.play().then(() => {
     if (seq !== loadSequence) return;
+    // 播放成功但用户已手动暂停（如播放中立刻按了暂停）：以元素实际状态为准
+    if (video.paused) { updatePlayPauseUI(false); return; }
     updatePlayPauseUI(true);
   }).catch((err) => {
     if (seq !== loadSequence) return;
@@ -422,10 +614,15 @@ async function loadAndPlayVideo(filePathOrFile) {
 
   showToast(`已加载: ${fileName}`);
 
-  // 检查并自动加载同目录下的同名字幕 (仅当有物理路径时)
-  if (hasRealPath && fullPath.includes('.')) {
-    const basePath = fullPath.substring(0, fullPath.lastIndexOf('.'));
-    checkAndAutoLoadSubtitles(basePath);
+  // 检查并自动加载同目录下的同名字幕 (仅当有物理路径且确为视频时；音频文件无字幕，避免同名 .srt 被误挂)
+  if (hasRealPath && !isAudioExt(fullPath)) {
+    // 仅当最后一个 '.' 位于路径分隔符之后才视为扩展名（目录名含点不算），避免 C:\a.b\movie 被误截断
+    const lastDot = fullPath.lastIndexOf('.');
+    const lastSep = Math.max(fullPath.lastIndexOf('/'), fullPath.lastIndexOf('\\'));
+    if (lastDot > lastSep) {
+      const basePath = fullPath.substring(0, lastDot);
+      checkAndAutoLoadSubtitles(basePath);
+    }
   }
 
   // 检查播放历史记忆（仅真实路径）
@@ -699,6 +896,7 @@ window.addEventListener('drop', (e) => {
 
 // === 播放列表管理功能 ===
 function addFilesToPlaylist(fileList) {
+  const existingKeys = new Set(playlist.map(item => item.key)); // O(1) 去重，替代 O(n²) 的逐项 some 扫描
   const newItems = [];
   fileList.forEach(fileOrPath => {
     let name = '';
@@ -712,9 +910,9 @@ function addFilesToPlaylist(fileList) {
       key = window.electronAPI.getFilePath(fileOrPath) || name;
     }
     if (!key) return;
-    // 防止重复添加（按唯一 key）
-    const exists = playlist.some(item => item.key === key);
-    if (!exists) {
+    // 防止重复添加（按唯一 key；同一批次内的重复也拦截）
+    if (!existingKeys.has(key)) {
+      existingKeys.add(key);
       newItems.push({ target, name, key });
     }
   });
@@ -829,6 +1027,8 @@ function renderHistoryView() {
     return;
   }
 
+  // 批量挂载：先拼进 DocumentFragment 再一次性插入，减少逐条插入引发的多次重排
+  const frag = document.createDocumentFragment();
   entries.forEach(([filePath, data]) => {
     const div = document.createElement('div');
     div.className = 'playlist-item';
@@ -868,8 +1068,9 @@ function renderHistoryView() {
       else renderPlaylist();
     });
 
-    playlistItemsContainer.appendChild(div);
+    frag.appendChild(div);
   });
+  playlistItemsContainer.appendChild(frag);
 }
 
 // 播放列表 / 历史记录视图切换
@@ -904,6 +1105,7 @@ function resetPlayerToEmpty() {
   if (resumeToast) resumeToast.style.display = 'none';
   video.src = '';
   video.load();
+  exitMusicMode(); // 清空播放器时撤掉音乐效果层，避免残留
   if (emptyState) emptyState.style.display = 'flex';
   isVideoLoaded = false;
   updatePlayPauseUI(false); // 复位播放/暂停图标（清空时可能正处于播放中）
@@ -978,8 +1180,8 @@ if (video) {
   video.addEventListener('ended', () => {
     if (playMode === 'single-loop') {
       video.currentTime = 0;
-      video.play().catch(console.error);
-      updatePlayPauseUI(true);
+      // UI 跟随 play() 结果：成功才显示播放中，失败保持暂停态，避免假状态
+      video.play().then(() => updatePlayPauseUI(true)).catch(() => updatePlayPauseUI(false));
       return;
     }
 
@@ -1101,6 +1303,9 @@ if (video) {
     initialWinX = window.screenX;
     initialWinY = window.screenY;
 
+    // rAF 合帧：拖拽每秒可达 60-120 次 pointermove，窗口位置只需每帧同步一次
+    let dragRafPending = false;
+    let dragTarget = { x: 0, y: 0 };
     const onPointerMove = (moveEv) => {
       const deltaX = moveEv.screenX - startX;
       const deltaY = moveEv.screenY - startY;
@@ -1115,10 +1320,14 @@ if (video) {
       }
 
       if (isDraggingWindow) {
-        window.electronAPI.moveWindow({
-          x: initialWinX + deltaX,
-          y: initialWinY + deltaY
-        });
+        dragTarget = { x: initialWinX + deltaX, y: initialWinY + deltaY };
+        if (!dragRafPending) {
+          dragRafPending = true;
+          requestAnimationFrame(() => {
+            dragRafPending = false;
+            window.electronAPI.moveWindow(dragTarget);
+          });
+        }
       }
     };
 
@@ -1175,7 +1384,8 @@ if (subtitleBtn && subtitleMenu) {
 }
 
 video.addEventListener('timeupdate', () => {
-  if (isSeeking || isNaN(video.duration)) return;
+  // 时长 0 / Infinity / NaN 时进度不可算，跳过（避免写入 NaN%/Infinity% 无效样式值）
+  if (isSeeking || !isFinite(video.duration) || video.duration <= 0) return;
   const current = video.currentTime;
   const total = video.duration;
   const percent = (current / total) * 100;
@@ -1204,6 +1414,26 @@ video.addEventListener('loadedmetadata', () => {
       height: video.videoHeight
     }).catch(err => console.warn('窗口自适应失败:', err));
   }
+
+  // 纯音频判定：无视频轨时 videoWidth/videoHeight 为 0（实测确认），切换音乐播放效果模式
+  if (!video.videoWidth && !video.videoHeight) {
+    const displayName = currentFilePath
+      ? currentFilePath.split(/[\\/]/).pop().replace(/\.[^.]+$/, '') || ''
+      : '';
+    enterMusicMode(currentFilePath, displayName);
+  } else {
+    exitMusicMode();
+  }
+});
+
+// 频谱动画跟随播放状态：播放即动、暂停即停（省电，不空转）
+video.addEventListener('play', () => {
+  // AudioContext 挂起兜底：自动播放策略收紧/长时间挂起后，每次播放都尝试唤醒音频上下文，否则会无声且无提示
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+  if (isMusicMode && !musicAnimFrame) drawSpectrumFrame();
+});
+video.addEventListener('pause', () => {
+  if (musicAnimFrame) { cancelAnimationFrame(musicAnimFrame); musicAnimFrame = null; }
 });
 
 // 视频加载失败提示（损坏文件 / 不支持的格式）
@@ -1211,15 +1441,16 @@ video.addEventListener('error', () => {
   updatePlayPauseUI(false);
   // 主动清空播放器(src='' + load())也会触发 error，此时不提示
   if (!isVideoLoaded) return;
+  exitMusicMode(); // 文件加载失败：撤掉残留的音乐界面（若上一首是纯音频），等下一个文件 loadedmetadata 再重建
   const ext = currentFilePath ? currentFilePath.split('.').pop().toLowerCase() : '';
-  showToast(`视频加载失败：系统无法解码该文件 (${ext || '未知的编码类型'})`);
+  showToast(`播放失败：系统无法解码该文件 (${ext || '未知的编码类型'})`);
 
-  // 若在播放列表中播放失败，延迟 1.5 秒自动跳到下一个"没失败过"的视频；
+  // 若在播放列表中播放失败，延迟 1.5 秒自动跳到下一个"没失败过"的媒体；
   // 全部条目都失败过才停止（用集合记录而非计数，列表中途增删也不会误判）
   if (playlist.length > 0 && currentPlaylistIndex >= 0 && currentPlaylistIndex < playlist.length && playMode !== 'single-loop') {
     failedPlaylistKeys.add(currentFilePath);
     if (playlist.every(item => failedPlaylistKeys.has(item.key))) {
-      showToast('播放列表中的视频均无法播放，已停止');
+      showToast('播放列表中的媒体均无法播放，已停止');
       return;
     }
     if (autoNextTimer) clearTimeout(autoNextTimer);
@@ -1432,6 +1663,7 @@ function applyAspectMode(mode) {
 // 窗口尺寸变化时重新计算布局（含比例锁定与旋转）
 window.addEventListener('resize', () => {
   applyVideoLayout();
+  if (isMusicMode) setupSpectrumCanvas(); // 音乐模式下同步重铺频谱画布
 });
 
 if (aspectRatioBtn && aspectMenu) {
@@ -1531,11 +1763,13 @@ function parseSubtitleTime(str) {
   const parts = String(str).trim().split(/\s+/)[0].split(':');
   if (parts.length === 2) parts.unshift('0'); // mm:ss 补齐为 hh:mm:ss
   if (parts.length !== 3) return NaN;
-  const h = parseInt(parts[0], 10) || 0;
-  const min = parseInt(parts[1], 10) || 0;
+  const h = parseInt(parts[0], 10);
+  const min = parseInt(parts[1], 10);
   const secParts = parts[2].split(/[.,]/);
-  const sec = parseInt(secParts[0], 10) || 0;
+  const sec = parseInt(secParts[0], 10);
   const ms = secParts[1] ? parseInt(secParts[1].padEnd(3, '0').slice(0, 3), 10) : 0;
+  // 任一段解析失败（非数字）整体返回 NaN，由调用方丢弃该条目，避免坏时间轴被静默当 0s 显示
+  if (isNaN(h) || isNaN(min) || isNaN(sec) || isNaN(ms)) return NaN;
   return h * 3600 + min * 60 + sec + ms / 1000;
 }
 
@@ -1598,7 +1832,8 @@ if (loadSubBtn) {
     try {
       const filePath = await window.electronAPI.openSubtitleDialog();
       if (filePath) {
-        const ok = await loadSubtitleFromPath(filePath);
+        // 带令牌：对话框/读取期间切了视频则丢弃旧字幕，避免覆盖到新视频上
+        const ok = await loadSubtitleFromPath(filePath, currentFilePath);
         showToast(ok ? '字幕导入成功' : '加载字幕文件失败');
       }
     } catch (err) {
@@ -1959,7 +2194,7 @@ function showControls() {
 
   if (controlsIdleTimer) clearTimeout(controlsIdleTimer);
 
-  if (!video.paused) {
+  if (video && !video.paused) {
     controlsIdleTimer = setTimeout(() => {
       controlsIdleTimer = null;
       if (controlBar) controlBar.classList.add('hide');

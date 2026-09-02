@@ -9,19 +9,20 @@
 
 ```
 BBPlayer/
-├── main.js               # Electron 主进程：多窗口工厂/状态记忆、IPC 信任面、文件对话框、目录扫描
+├── main.js               # Electron 主进程：多窗口工厂/状态记忆、系统托盘、IPC 信任面、文件对话框、目录扫描
 ├── preload.js            # 预加载脚本：contextBridge 暴露 electronAPI（渲染进程唯一系统入口）
-├── renderer.js           # 渲染层全部业务逻辑（约 2000 行，单文件策略，每窗口一份独立实例）
-├── index.html            # 界面结构 + 全部内联 CSS（毛玻璃视觉，单文件免额外请求）
-├── shared-video-exts.js  # 视频扩展名单一来源（主进程用）
+├── renderer.js           # 渲染层全部业务逻辑（约 2200 行，单文件策略，每窗口一份独立实例）
+├── index.html            # 界面结构 + 全部内联 CSS（毛玻璃视觉 + 音乐播放效果层，单文件免额外请求）
+├── shared-video-exts.js  # 媒体扩展名单一来源：视频 19 种 + 音频 6 种（主进程用）
 ├── run-test.bat          # 源码方式启动测试（自动检测 Node/Electron 环境）
-├── build/                # 打包图标
+├── build/                # 打包图标（ico/png，同时用作系统托盘图标）
 └── package.json          # 元数据 + electron-builder 配置
 ```
 
 **依赖纪律**：运行时零 npm 依赖；仅 `electron` 与 `electron-builder` 两个 devDependencies。
-视频扩展名清单存在三处人工同步点：`shared-video-exts.js`、`preload.js`（沙箱内无法 require）、
-`package.json` 的 `build.fileAssociations`——修改时三处必须一起改。
+扩展名清单存在人工同步点：`shared-video-exts.js`、`preload.js`（沙箱内无法 require）、
+`package.json` 的 `build.fileAssociations`，以及 `renderer.js` 顶部的 `AUDIO_EXTS` 音频子集
+（音频判定/跳字幕查找用）——修改时四处必须一起改，回归断言会对前三处做一致性校验。
 
 ---
 
@@ -166,7 +167,89 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 
 ---
 
+### 12. 纯音频音乐播放效果层（v1.5.0 新增）
+
+**目标**：软件同时充当音乐播放器——主流音频格式直接可播，纯音频时窗口呈现音乐播放界面。
+
+**核心设计**：
+
+1. **格式支持零成本**：Electron 官方构建的 Chromium 自带全部六种解码器（mp3/flac/wav/ogg/m4a/aac，
+   实测含裸 ADTS `.aac`），运行时零新增依赖；仅需扩展名白名单放行。
+2. **纯音频判定**：`loadedmetadata` 后 `videoWidth === 0 && videoHeight === 0`（实测确认的可靠信号），
+   据此切换音乐模式：显示效果层、隐藏截图/字幕按钮、跳过同名字幕自动查找。
+3. **频谱可视化**：`AnalyserNode`（fftSize 256、smoothing 0.82）串入既有增益管线
+   （source → gain → analyser → compressor → destination），只读分流不改音质；32 根圆角渐变柱
+   由 `requestAnimationFrame` 驱动，暂停即 cancelAnimationFrame 并清空画布（省电）。
+4. **封面与主色环境光**：主进程 `file:findCover` IPC 查找同目录 cover/folder/同名图片；
+   封面加载成功后 24×24 canvas 采样主色，55% 压暗生成背景渐变 + `--cover-glow` 光晕
+   （Ambient 风格，每首歌背景色不同）；canvas 受限时 try/catch 保留默认深色背景。
+5. **令牌防串台**：`musicCoverToken` 令牌 + 闭包捕获，快速切歌时旧封面加载结果一律丢弃。
+
+### 13. 系统托盘常驻与窗口行为策略（v1.5.0 新增）
+
+**目标**：点关闭不退出程序，收进系统托盘继续后台播放；最小化策略按视频/音频分流。
+
+**核心设计**：
+
+1. **托盘**：`Tray`（build/icon.ico，兜底 icon.png）+ `Menu`（打开界面 / 关闭软件）。
+   Windows 设置 `setContextMenu` 后 click/double-click 事件不触发，故改手动弹出：
+   - 左键单击：延迟 260ms 判定（让出双击机会）后 `popUpContextMenu`；
+   - 左键双击：立即 `showMainWindow()`（并清除挂起的单击计时器）；
+   - **右键**：立即弹菜单（无双击语义）。
+2. **关闭拦截**：主窗口 `win.on('close')` 在 `!isQuitting` 时 `preventDefault() + win.hide()`；
+   `app.on('before-quit')` 置 `isQuitting = true` 放行真正退出（托盘"关闭软件"/系统关机路径）。
+3. **隐藏-显示事件转发**：`win.on('hide'/'show')` 复用 `window-minimized`/`window-restored`
+   消息通道，渲染进程按 `isMusicMode` 决策：**视频暂停、纯音频继续后台播放**
+   （`backgroundThrottling: false` 保证后台不卡顿）。
+4. **常驻守护**：`window-all-closed` 仅在 `isQuitting` 时退出进程；即使窗口全部意外关闭，
+   托盘仍在，`showMainWindow()` 可随时重建主窗口（含 `second-instance` 双击唤起场景）。
+5. **窗口状态**：隐藏不销毁窗口（bounds 状态在内存），真正退出时才落盘 `window-state.json`。
+
+---
+
 ## 三、版本变更明细
+
+### v1.5.0
+
+#### A. 主流音频格式支持（用户需求，核心功能）
+
+- 六种音频格式 `mp3 / flac / wav / ogg / m4a / aac` 全部原生支持（Chromium 自带解码器，
+  真实样本在 Electron 34 实测 `canplay` 通过，含最冷门的裸 ADTS `.aac`），运行时零新增依赖。
+- 扩展名白名单四处同步放行（shared / preload / package.json fileAssociations / renderer AUDIO_EXTS），
+  打开对话框新增"音频文件"过滤器，双击关联、拖拽、命令行打开、文件夹扫描全部覆盖音频。
+- 纯音频判定：`videoWidth === 0 && videoHeight === 0`（实测确认），进入音乐播放效果模式。
+
+#### B. 音乐播放效果模式（用户需求，界面重设计）
+
+- **频谱可视化**：Web Audio `AnalyserNode` 串入既有增益/防破音管线（只读分流不改音质），
+  32 根圆角渐变柱沉底横贯，播放跳动、暂停清空（省电）。
+- **封面自动查找**：主进程 `file:findCover` IPC 找同目录 cover.jpg/folder.jpg/同名图片；
+  找不到显示音符占位图。
+- **封面主色环境光（Ambient）**：24×24 canvas 采样封面主色 → 背景渐变与光晕随歌变化，
+  try/catch 兜底 + 无封面时重置默认背景；换歌用 `musicCoverToken` 令牌防旧封面串台。
+- **信息层级**：歌名（clamp 自适应字号）+ 元信息行（格式 · 时长，uppercase 小字）。
+- 音频模式下隐藏截图/字幕按钮、跳过同名字幕自动查找（防同名 .srt 被误挂）。
+
+#### C. 窗口行为策略（用户需求）
+
+- **最小化/隐藏分流**：视频最小化/隐藏自动暂停（恢复续播），纯音频音乐模式**不暂停、后台继续**。
+- **系统托盘常驻**：主窗口点"关闭"改为隐藏到托盘，音乐/视频继续后台播放；
+  托盘左键单击弹菜单（打开界面/关闭软件）、左键双击直接打开、右键弹菜单；
+  `before-quit`/`window-all-closed` 守卫保证只有显式退出才结束进程；
+  `second-instance`（再次双击 exe/关联文件）唤起隐藏的主窗口。
+
+#### D. 全量代码审查修复（安全 / 正确性 / 性能）
+
+- **安全**：CSP `img-src` 补 `file:`（封面 file:// 图兼容）；`path-to-url` 加扩展名白名单 +
+  存在性校验；截图保存文件名清洗路径分隔符；显式 `sandbox: true`。
+- **正确性**：AudioContext 挂起时 `play` 事件兜底 resume（防无声）；进度条排除 0/Infinity 时长
+  （防 NaN% 样式值）；单曲循环播放失败不再显示假"播放中"；手动加载字幕带令牌防切歌覆盖；
+  目录名含点时字幕截断误判修复；坏字幕时间轴（`"abc:def"`）改整体丢弃而非静默当 0 秒；
+  自动播放回调复核用户手动暂停。
+- **性能**：窗口拖拽 IPC rAF 合帧（每帧最多同步一次位置）；播放列表去重 O(n²)→O(1) Set；
+  历史视图 DocumentFragment 批量挂载。
+- **维护**：倍速格式化冗余运算清理；比例按钮初始文案与默认模式一致；托盘右键补监听（修复
+  右键无菜单 bug）。
 
 ### v1.4.4
 

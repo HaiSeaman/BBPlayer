@@ -1,6 +1,6 @@
 {
   "name": "bb-player",
-  "version": "1.4.4",
+  "version": "1.5.0",
   "description": "BBPlayer",
   "main": "main.js",
   "scripts": {
@@ -41,9 +41,9 @@
           "mkv",
           "avi",
           "mov",
-          "wmv",
-          "flv",
           "webm",
+          "flv",
+          "wmv",
           "m4v",
           "ts",
           "rmvb",
@@ -55,9 +55,15 @@
           "vob",
           "ogv",
           "f4v",
-          "m2v"
+          "m2v",
+          "mp3",
+          "flac",
+          "wav",
+          "ogg",
+          "m4a",
+          "aac"
         ],
-        "name": "Video File",
+        "name": "Media File",
         "role": "Viewer"
       }
     ],
