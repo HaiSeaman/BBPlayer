@@ -13,16 +13,18 @@ BBPlayer/
 ├── preload.js            # 预加载脚本：contextBridge 暴露 electronAPI（渲染进程唯一系统入口）
 ├── renderer.js           # 渲染层全部业务逻辑（约 2200 行，单文件策略，每窗口一份独立实例）
 ├── index.html            # 界面结构 + 全部内联 CSS（毛玻璃视觉 + 音乐播放效果层，单文件免额外请求）
-├── shared-video-exts.js  # 媒体扩展名单一来源：视频 19 种 + 音频 6 种（主进程用）
+├── shared-video-exts.js  # 媒体扩展名单一事实来源：结构化 { video, audio, all }
+├── verify-exts.js        # 扩展名一致性对账脚本（shared-video-exts ↔ package.json fileAssociations）
 ├── run-test.bat          # 源码方式启动测试（自动检测 Node/Electron 环境）
 ├── build/                # 打包图标（ico/png，同时用作系统托盘图标）
 └── package.json          # 元数据 + electron-builder 配置
 ```
 
 **依赖纪律**：运行时零 npm 依赖；仅 `electron` 与 `electron-builder` 两个 devDependencies。
-扩展名清单存在人工同步点：`shared-video-exts.js`、`preload.js`（沙箱内无法 require）、
-`package.json` 的 `build.fileAssociations`，以及 `renderer.js` 顶部的 `AUDIO_EXTS` 音频子集
-（音频判定/跳字幕查找用）——修改时四处必须一起改，回归断言会对前三处做一致性校验。
+扩展名单一事实来源为 `shared-video-exts.js`（结构化 `video/audio/all`）：主进程直接 require，
+preload（沙箱无法 require 本地模块）与渲染进程经 IPC `app:getVideoExtensions` 获取同一份数据。
+`package.json` 的 `build.fileAssociations` 为 electron-builder 独立配置，二者一致性由
+`node verify-exts.js`（对账脚本，随仓库保留）自动校验。
 
 ---
 
@@ -204,10 +206,109 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 4. **常驻守护**：`window-all-closed` 仅在 `isQuitting` 时退出进程；即使窗口全部意外关闭，
    托盘仍在，`showMainWindow()` 可随时重建主窗口（含 `second-instance` 双击唤起场景）。
 5. **窗口状态**：隐藏不销毁窗口（bounds 状态在内存），真正退出时才落盘 `window-state.json`。
+   落盘使用 `win.getNormalBounds()`（最大化时取恢复后边界）+ `maximized` 标志，启动时恢复最大化，
+   避免"伪最大化"占满工作区；程序化自动贴合（`resize-window-to-video` 的 setSize）经
+   `programmaticResizeWindows`（WeakSet）标记后不再触发状态记忆，避免覆盖用户手调尺寸。
+
+---
+
+### 14. 双主题外观（v1.5.1 新增）
+
+**目标**：浅色 / 深色两套外观一键切换，品牌色共享、中性色反转，文字与控件始终清晰。
+
+**核心设计**：
+
+1. **变量体系**：`:root` 定义深色默认变量集；`:root[data-theme='light']` 整体覆盖为浅色系
+   （背景 `--bg-obsidian` / 面板 `--panel-glass` / 文字 `--text-*` / 控件 `--ctrl-*` / 菜单 /
+   进度条 / 字幕 / 音乐背景等 30+ 语义变量）。所有颜色必须走变量，禁止硬编码。
+2. **强调文字色**：`--accent-text` 独立于霓虹 `--accent-neon`——深色亮青 `#00f2fe`、浅色深青蓝
+   `#0284c7`（纯青色在浅底上对比度不足，5 处强调文字统一用此变量）。
+3. **切换**：`renderer.js` 的 `applyAppearance(isLight)` 设置 `document.documentElement.dataset.theme`；
+   外观按钮 `#btn-appearance`（循环播放键左侧）图标太阳（深色）/ 月亮（浅色）提示目标状态。
+4. **持久化**：`bb_player_settings.appearance`（'light' / 'dark'），启动恢复。
+5. **音乐模式适配**：`applyCoverGlow` 按主题拼接两套封面环境光衬底（深色压暗 55% 配深蓝，
+   浅色提亮 90% 配浅蓝白）；切换主题时若封面光晕在线则重算；无封面时回落到 CSS `--music-bg`。
+6. **边界说明**：多窗口并存时外观仅作用于当前窗口 DOM；新开窗口按存档主题初始化
+   （如需全窗口实时同步需主进程广播，当前未实现）。
+
+**浅色可读性专项**（审查要点）：字幕白底深字（叠黑视频画面上更醒目）、歌名/副标题阴影换浅、
+空状态 SVG Logo 走 `--empty-logo-fill/stroke` 变量（浅色下换深色描边）、进度条圆点 `--handle-bg` 换深蓝。
+
+---
+
+### 15. 标题栏透明化与品牌图标（v1.5.1）
+
+**标题栏**：`#titlebar` 的 `background` 由渐隐毛玻璃色带（`--titlebar-bg`，已删除）改为 `transparent`；
+文字可读性由 `--titlebar-shadow`（text-shadow，深黑/浅白两套）与 `--titlebar-icon-shadow`
+（`drop-shadow`，作用于 `.title-logo svg` 与 `.win-btn`）兜底；`-webkit-app-region: drag`
+拖拽区与透明背景无关，行为不变。
+
+**品牌图标**：`build/icon.png`（512px 高清）与 `build/icon.ico`（16/24/32/48/64/128/256
+八尺寸 PNG 条目）为"彩色播放键"：青→蓝→紫三段渐变 + 左缘玻璃高光带 + 半透明深蓝描边 +
+全透明底。素材由一次性 PowerShell + System.Drawing 抗锯齿绘制生成（脚本未入库，产物已固化；
+如需重绘可参照几何参数：三角形 (0.20,0.15)/(0.20,0.85)/(0.80,0.50) 归一坐标，渐变 #00E5FF→#3B9DF6→#8B5CF6）。
+图标出口覆盖：应用窗口/任务栏（icon.png → BrowserWindow.icon）、系统托盘与打包 EXE
+资源（icon.ico → Tray / electron-builder win.icon）、文件关联（默认跟随应用图标）。
 
 ---
 
 ## 三、版本变更明细
+
+### v1.5.1（当前工作区）——双主题外观 + 品牌图标 + 标题栏透明化 + 工程重构与正确性加固
+
+#### A. 双主题外观（用户需求，新功能）
+
+- `:root` 全面变量化（30+ 语义变量收敛散落硬编码），新增 `:root[data-theme='light']` 整套浅色覆盖；
+- 循环播放键左侧新增 `#btn-appearance` 外观切换键（SUN/MOON 图标提示目标状态）；
+- `applyAppearance()` / `isLightTheme()` 切换 `document.documentElement.dataset.theme`；
+- `--accent-text` 强调文字色主题自适应（浅色下纯青不可读）；
+- 音乐模式封面环境光按主题双衬底，主题切换时在线重算；
+- 持久化 `appearance` 字段 + 启动恢复。
+
+#### B. 品牌图标重制（用户需求）
+
+- 彩色播放键（青→蓝→紫渐变 + 玻璃高光 + 深蓝描边 + 透明底）；
+- 替换 `build/icon.png`（512px）与 `build/icon.ico`（8 尺寸 PNG 条目）；
+- 出口全覆盖：窗口/任务栏、托盘、打包 EXE、文件关联。
+
+#### C. 标题栏透明化（用户需求）
+
+- 删除 `--titlebar-bg` 渐隐毛玻璃色带，`#titlebar` 全透明；
+- `--titlebar-shadow` / `--titlebar-icon-shadow`（深黑/浅白两套）保障画面上的文字图标可读；
+- `win-btn:hover` 边框变量化（`--win-hover-border`），浅色主题 hover 反馈完整。
+
+#### D. 工程重构与一致性校验
+
+- `shared-video-exts.js` 结构化 `{ video, audio, all }`；preload 内联列表移除，
+  渲染进程经 IPC `app:getVideoExtensions` 获取同一份数据；
+- 新增 `verify-exts.js` 对账脚本（shared ↔ package.json fileAssociations，`node verify-exts.js`）；
+- 删除 `reasonix.toml` 与 `.reasonix/` 工具残留（82 文件）；`.gitignore` 清理平台无关死规则；
+- 文档诚实化：移除"已有回归测试覆盖"等不实声明，标注历史一次性验证未入库。
+
+#### E. 正确性与健壮性修复（全量审查，共 13 项）
+
+1. **清空播放列表竞态**：`resetPlayerToEmpty()` 递增 `loadSequence` 作废挂起异步加载（防止清空后旧视频复活回填）；
+2. **无时长媒体**：`formatTime` 改 `Number.isFinite` 兜底（Infinity 不再显示 `Infinity:NaN:NaN`）；
+3. **播放结束图标**：`ended` 先 `updatePlayPauseUI(false)` 复位（空列表/切歌缓冲期不再残留暂停态图标）；
+4. **恢复窗口不强制续播**：`onWindowRestored` 补 `!video.paused` 校验（已自然播完不再被播起）；
+5. **音乐模式截图快捷键**：`KeyS` 追加 `!isMusicMode`，不再弹无意义错误 Toast；
+6. **窗口拖拽监听器泄漏**：`pointerdown` 拖拽路径补 `blur` 兜底清理（与 seek 路径对称）；
+7. **second-instance 崩溃风险**：建窗延迟到 `app.whenReady()`（开机自启双实例竞争不再抛"ready 前建窗"异常）；
+8. **最大化状态持久化**：落盘 `getNormalBounds()` + `maximized` 标志，重启恢复最大化（修复"伪最大化"占满工作区）;
+9. **命令行多文件**：`parseFilePathFromArgs` 返回数组，多文件逐个开独立窗口播放；
+10. **程序化尺寸不覆写偏好**：`programmaticResizeWindows`（WeakSet）标记自动贴合 setSize，
+    仅用户手势（will-resize）触发状态记忆；
+11. **弹窗文件一次性消费**：`did-finish-load` 发送后置空 `initialFile`（页面重载不重复投喂）；
+12. **冷启动双通道归一**：删除 `app:getInitialFile` IPC 死通道，统一走 `open-file` 事件；
+13. **对话框过滤器去重**：'音频文件' 字面量 → `VIDEO_EXTS.audio`。
+
+#### F. 冗余精简
+
+- 四个弹出菜单孪生代码 → `bindMenuToggle(btn, menu)` 统一（净 -13 行）；
+- 频谱画布每帧 `getContext('2d')` → `spectrumCtx` 缓存；
+- `run-test.bat` 保留（小白入口）；构建产物/双打包目标为用户决策项未代改。
+
+---
 
 ### v1.5.0
 
@@ -215,7 +316,7 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 
 - 六种音频格式 `mp3 / flac / wav / ogg / m4a / aac` 全部原生支持（Chromium 自带解码器，
   真实样本在 Electron 34 实测 `canplay` 通过，含最冷门的裸 ADTS `.aac`），运行时零新增依赖。
-- 扩展名白名单四处同步放行（shared / preload / package.json fileAssociations / renderer AUDIO_EXTS），
+- 扩展名统一经单一来源 `shared-video-exts.js` 下发（IPC `app:getVideoExtensions`），
   打开对话框新增"音频文件"过滤器，双击关联、拖拽、命令行打开、文件夹扫描全部覆盖音频。
 - 纯音频判定：`videoWidth === 0 && videoHeight === 0`（实测确认），进入音乐播放效果模式。
 
@@ -398,17 +499,16 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 2. **合并拖拽监听**：原先同一事件挂两套监听器（一个循环挂 preventDefault +
    三个独立处理器），合并为四个各司其职的监听器；
    ⚠️ 施工中修复隐患：合并后 `drop` 处理器需自带 `preventDefault()`，
-   否则浏览器会抢开被拖入的文件（已有回归测试覆盖）；
+   否则浏览器会抢开被拖入的文件（回归验证为一次性人工测试，未保留在仓库）；
 3. **合并上一首/下一首**：两段孪生代码 → `skipPlaylist(step)`；
    新旧索引算法已在列表长度 1/2/3/5/200 × 全下标 × 双方向对账，严格等价。
 
-#### C. 质量保障手段（可复用）
+#### C. 质量保障手段（自动化项以仓库现存文件为准）
 
-- `node --check renderer.js` 语法门禁；
-- 算法等价性对账脚本（Node 直接跑，无需框架）；
-- 无头浏览器回归：`puppeteer-core` + 系统 Edge 驱动真实鼠标/拖拽事件，
-  通过注入 stub `electronAPI` 的临时 HTML 页面在纯浏览器环境加载 UI 层验证
-  （临时页测后即删，不入库）。
+- `node --check main.js preload.js renderer.js shared-video-exts.js verify-exts.js` 语法门禁；
+- `node verify-exts.js`：扩展名一致性对账（`shared-video-exts.js` ↔ `package.json` 的 `build.fileAssociations`）；
+- 曾用 `puppeteer-core` + 注入 stub `electronAPI` 的临时 HTML 页面做无头浏览器回归
+  （真实鼠标/拖拽事件），临时页测后即删，**未保留入库**（历史尝试，勿当作现存能力）。
 
 #### v1.3 及之前的历史变更见 README.md 更新日志章节与 git 历史。
 

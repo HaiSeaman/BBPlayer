@@ -1,11 +1,4 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
-// 媒体扩展名列表（视频 + 音频）：沙箱渲染进程无法 require 本地模块，故在此内联。
-// 修改时务必同步 shared-video-exts.js（主进程用）与 package.json 的 fileAssociations。
-const VIDEO_EXTS = [
-  'mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv', 'm4v', 'ts',
-  'rmvb', 'rm', '3gp', 'mpg', 'mpeg', 'm2ts', 'vob', 'ogv', 'f4v', 'm2v',
-  'mp3', 'flac', 'wav', 'ogg', 'm4a', 'aac'
-];
 
 // 幂等事件订阅：重复调用同一 API 时先解绑旧监听器，避免回调累积重复触发
 function makeIdempotentSubscriber(channel) {
@@ -19,8 +12,8 @@ function makeIdempotentSubscriber(channel) {
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  // 支持的视频扩展名（不带点，供渲染进程拖拽/过滤判断）
-  videoExtensions: VIDEO_EXTS,
+  // 获取媒体扩展名（单一来源：shared-video-exts.js → 主进程 IPC 下发），结构 { video, audio, all }
+  getVideoExtensions: () => ipcRenderer.invoke('app:getVideoExtensions'),
 
   // 窗口控制
   minimizeWindow: () => ipcRenderer.send('window-minimize'),
@@ -47,10 +40,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 保存图片截图到本地（ArrayBuffer 载荷，避免大图 base64 膨胀）
   saveScreenshot: (data, defaultName) => ipcRenderer.invoke('dialog:saveScreenshot', { data, defaultName }),
 
-  // 获取启动时双击/命令行传入的视频文件路径
-  getInitialFile: () => ipcRenderer.invoke('app:getInitialFile'),
-
-  // 监听软件运行中打开视频文件的事件（双击关联文件或 second-instance）
+  // 监听软件运行中打开视频文件的事件（双击关联文件或 second-instance；冷启动文件亦经此事件下发）
   onOpenFile: makeIdempotentSubscriber('open-file'),
 
   // 安全获取拖拽文件的物理路径（Electron 32+ 唯一官方方式）

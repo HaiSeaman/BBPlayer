@@ -1,15 +1,14 @@
 // 本软件仅运行于 Electron，preload 未注入即属致命错误
 if (!window.electronAPI) throw new Error('BBPlayer 必须在 Electron 环境中运行');
 
-// === 监听外部/命令行双击打开的文件 ===
-window.electronAPI.getInitialFile().then(filePath => {
-  if (filePath) {
-    addFilesToPlaylist([filePath]);
-  }
-}).catch(err => {
-  console.error('获取冷启动文件失败:', err);
-});
+// 媒体扩展名（单一事实来源 shared-video-exts.js，经主进程 IPC 一次性获取）。
+// 异步获取足够安全：所有消费点（拖拽过滤、音频判断）都发生在用户交互之后。
+let mediaExtensions = { video: [], audio: [], all: [] };
+window.electronAPI.getVideoExtensions().then(list => {
+  if (list && Array.isArray(list.all)) mediaExtensions = list;
+}).catch(() => {});
 
+// === 监听外部/命令行双击打开的文件（冷启动与运行中打开均经此事件下发） ===
 window.electronAPI.onOpenFile((filePath) => {
   if (filePath) {
     addFilesToPlaylist([filePath]);
@@ -28,7 +27,8 @@ window.electronAPI.onWindowMinimized(() => {
 });
 window.electronAPI.onWindowRestored(() => {
   if (wasPlayingBeforeMinimize) {
-    if (video && isVideoLoaded) {
+    if (video && isVideoLoaded && !video.paused) {
+      // 最小化期间视频若已自然播完（ended 自动暂停），不再强制续播，避免"播完又被播起"
       video.play().then(() => {
         updatePlayPauseUI(true);
       }).catch(console.error);
@@ -72,6 +72,7 @@ const playModeBtn = document.getElementById('btn-play-mode');
 const playModeMenu = document.getElementById('play-mode-menu');
 const rotateBtn = document.getElementById('btn-rotate');
 const fullscreenBtn = document.getElementById('btn-fullscreen');
+const btnAppearance = document.getElementById('btn-appearance');
 
 // 进度条与时间
 const progressContainer = document.getElementById('progress-container');
@@ -131,18 +132,18 @@ let currentRotation = 0; // 顺时针旋转角度：0 / 90 / 180 / 270
 let playMode = 'list-loop'; // 'list-loop' (全部视频循环) | 'random' (全部视频随机) | 'single-loop' (单个视频循环)
 
 // === 纯音频音乐模式状态 ===
-// 音频扩展名（与 shared-video-exts.js / preload.js 保持一致；注意 m4v 是视频，别混进来）
-const AUDIO_EXTS = new Set(['mp3', 'flac', 'wav', 'ogg', 'm4a', 'aac']);
+// 音频扩展名自 mediaExtensions.audio 派生（注意 m4v 是视频，别混进来）
 let isMusicMode = false;        // 当前是否处于"纯音频音乐播放效果"模式
 let musicAnimFrame = null;      // 频谱动画 requestAnimationFrame 句柄
 let musicCoverToken = 0;        // 封面异步加载令牌：换歌后旧封面结果作废
+let spectrumCtx = null;         // 频谱画布 2D 上下文缓存（getContext 每帧重复调用纯属浪费）
 
 // 判断是否为音频扩展名（用于跳字幕查找等同步分支）
 function isAudioExt(p) {
   if (!p || typeof p !== 'string') return false;
   const dot = p.lastIndexOf('.');
   if (dot < 0) return false;
-  return AUDIO_EXTS.has(p.substring(dot + 1).toLowerCase());
+  return mediaExtensions.audio.includes(p.substring(dot + 1).toLowerCase());
 }
 
 // === 音量增益管线（Web Audio：音量可放大到 0%~200%，带防破音保护） ===
@@ -227,13 +228,13 @@ function drawSpectrumFrame() {
   if (video.paused) {
     // 暂停即停：清空画布（干净利落），不再空转耗电
     musicAnimFrame = null;
-    if (musicSpectrumCanvas && musicSpectrumCanvas.width > 0) {
-      const c2 = musicSpectrumCanvas.getContext('2d');
-      if (c2) c2.clearRect(0, 0, musicSpectrumCanvas.width, musicSpectrumCanvas.height);
+    if (musicSpectrumCanvas && musicSpectrumCanvas.width > 0 && spectrumCtx) {
+      spectrumCtx.clearRect(0, 0, musicSpectrumCanvas.width, musicSpectrumCanvas.height);
     }
     return;
   }
-  const ctx = musicSpectrumCanvas && musicSpectrumCanvas.getContext('2d');
+  if (!spectrumCtx && musicSpectrumCanvas) spectrumCtx = musicSpectrumCanvas.getContext('2d');
+  const ctx = spectrumCtx;
   if (!ctx || !analyserNode) { musicAnimFrame = null; return; }
   const W = musicSpectrumCanvas.width;
   const H = musicSpectrumCanvas.height;
@@ -286,9 +287,12 @@ function applyCoverGlow(imgEl) {
     for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
     if (!n) return;
     r = Math.round(r / n); g = Math.round(g / n); b = Math.round(b / n);
-    // 背景用压暗 45% 的主色做光源；光晕直接用主色半透明
-    musicVisualizer.style.background =
-      `radial-gradient(ellipse 130% 95% at 50% 22%, rgb(${(r * 0.55) | 0},${(g * 0.55) | 0},${(b * 0.55) | 0}) 0%, #101a30 58%, #070b16 100%)`;
+    // 背景用主色做光源：深色主题压暗 55% 配深蓝衬底；浅色主题提亮配浅蓝白衬底。
+    // 光晕直接用主色半透明（两主题共用）
+    const light = isLightTheme();
+    musicVisualizer.style.background = light
+      ? `radial-gradient(ellipse 130% 95% at 50% 22%, rgb(${Math.min(255, Math.round(r * 0.9)) | 0},${Math.min(255, Math.round(g * 0.9)) | 0},${Math.min(255, Math.round(b * 0.9)) | 0}) 0%, #dfe9f6 58%, #f2f4f9 100%)`
+      : `radial-gradient(ellipse 130% 95% at 50% 22%, rgb(${(r * 0.55) | 0},${(g * 0.55) | 0},${(b * 0.55) | 0}) 0%, #101a30 58%, #070b16 100%)`;
     musicVisualizer.style.setProperty('--cover-glow', `rgba(${r},${g},${b},0.35)`);
   } catch (err) {
     // 忽略：保留默认背景
@@ -396,7 +400,7 @@ const SETTINGS_KEY = 'bb_player_settings';
 const HISTORY_MAX = 200;
 
 function formatTime(seconds) {
-  if (isNaN(seconds) || seconds < 0) return '00:00';
+  if (!Number.isFinite(seconds) || seconds < 0) return '00:00'; // Infinity（无时长媒体）与 NaN 一并兜底，避免 "Infinity:NaN:NaN"
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
@@ -460,7 +464,8 @@ function persistSettings() {
       subtitleOffset,
       subtitleFontSize: currentSubtitleFontSize,
       subtitleVisible: isSubtitleVisible,
-      playMode
+      playMode,
+      appearance: isLightTheme() ? 'light' : 'dark'
     }));
   } catch (e) {
     // 忽略写入失败
@@ -483,6 +488,9 @@ function persistSettings() {
       playMode = s.playMode;
     }
     updatePlayModeUI(playMode, false);
+    // 外观主题恢复（默认深色；浅色需显式标记），并同步外观按钮图标（不写回存储）
+    if (s.appearance === 'light') document.documentElement.dataset.theme = 'light';
+    applyAppearance(isLightTheme());
     if (customSubtitle) {
       customSubtitle.style.fontSize = `${currentSubtitleFontSize}px`;
       customSubtitle.style.display = isSubtitleVisible ? 'block' : 'none';
@@ -862,8 +870,8 @@ window.addEventListener('drop', (e) => {
   const files = e.dataTransfer ? Array.from(e.dataTransfer.files) : [];
   if (files.length === 0) return;
 
-  // 视频扩展名与主进程共享同一份列表（preload 注入）
-  const videoExtensions = window.electronAPI.videoExtensions;
+  // 视频扩展名与主进程共享同一份列表（单一来源，经 IPC 下发）
+  const videoExtensions = mediaExtensions.all;
   const videoFiles = files.filter(f => {
     // 过滤掉非视频扩展名以及大小为0或类似文件夹的非法条目
     if (!f.name || f.size === 0 || (f.type === '' && !f.name.includes('.'))) return false;
@@ -1094,6 +1102,7 @@ if (historyViewBtn) {
 // 将播放器重置为空状态（播放列表由调用方清空）
 function resetPlayerToEmpty() {
   clearAutoNextTimer(); // 挂起的"1秒后自动切集"必须作废，防止清空后误播新加入的视频
+  loadSequence++; // 作废所有挂起的异步加载：await toFileUrl 期间清空播放器，旧调用不得回填（防止"清空后旧视频复活"）
   currentPlaylistIndex = -1;
   hasRealPath = false;
   currentFilePath = '';
@@ -1178,6 +1187,8 @@ function removePlaylistItem(index) {
 // 视频播放结束处理（支持全部循环、全部随机、单个循环）
 if (video) {
   video.addEventListener('ended', () => {
+    // 播放自然结束：先复位图标（single-loop 分支随即恢复播放态；有列表分支 1s 后切歌恢复）
+    updatePlayPauseUI(false);
     if (playMode === 'single-loop') {
       video.currentTime = 0;
       // UI 跟随 play() 结果：成功才显示播放中，失败保持暂停态，避免假状态
@@ -1335,6 +1346,7 @@ if (video) {
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointercancel', onPointerCancel);
+      window.removeEventListener('blur', onPointerCancel);
     };
 
     const onPointerUp = (upEv) => {
@@ -1361,6 +1373,7 @@ if (video) {
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
     window.addEventListener('pointercancel', onPointerCancel);
+    window.addEventListener('blur', onPointerCancel); // 与 seek 路径一致：按住拖拽时失焦（Alt-Tab）兜底清理，防止监听器累积
   });
 }
 
@@ -1374,14 +1387,18 @@ function closeAllMenus(except) {
 // 点击任意非菜单区域关闭菜单
 document.addEventListener('click', () => closeAllMenus());
 
-// === 字幕菜单与字幕控制绑定 ===
-if (subtitleBtn && subtitleMenu) {
-  subtitleBtn.addEventListener('click', (e) => {
+// 弹出菜单统一开关：点击所属按钮切换显隐，并互斥关闭其余菜单
+function bindMenuToggle(btn, menu) {
+  if (!btn || !menu) return;
+  btn.addEventListener('click', (e) => {
     e.stopPropagation();
-    closeAllMenus(subtitleMenu);
-    subtitleMenu.classList.toggle('show');
+    closeAllMenus(menu);
+    menu.classList.toggle('show');
   });
 }
+
+// === 字幕菜单与字幕控制绑定 ===
+bindMenuToggle(subtitleBtn, subtitleMenu);
 
 video.addEventListener('timeupdate', () => {
   // 时长 0 / Infinity / NaN 时进度不可算，跳过（避免写入 NaN%/Infinity% 无效样式值）
@@ -1588,13 +1605,8 @@ window.addEventListener('wheel', (e) => {
 }, { passive: false });
 
 // === 多倍速切换菜单 ===
-if (speedBtn && speedMenu) {
-  speedBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    closeAllMenus(speedMenu);
-    speedMenu.classList.toggle('show');
-  });
-
+bindMenuToggle(speedBtn, speedMenu);
+if (speedMenu) {
   speedMenu.addEventListener('click', (e) => {
     e.stopPropagation();
     const item = e.target.closest('.menu-item');
@@ -1666,13 +1678,8 @@ window.addEventListener('resize', () => {
   if (isMusicMode) setupSpectrumCanvas(); // 音乐模式下同步重铺频谱画布
 });
 
-if (aspectRatioBtn && aspectMenu) {
-  aspectRatioBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    closeAllMenus(aspectMenu);
-    aspectMenu.classList.toggle('show');
-  });
-
+bindMenuToggle(aspectRatioBtn, aspectMenu);
+if (aspectMenu) {
   aspectMenu.querySelectorAll('.menu-item').forEach(item => {
     item.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1949,13 +1956,8 @@ function updatePlayModeUI(mode, showNotification = true) {
   }
 }
 
-if (playModeBtn && playModeMenu) {
-  playModeBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    closeAllMenus(playModeMenu);
-    playModeMenu.classList.toggle('show');
-  });
-
+bindMenuToggle(playModeBtn, playModeMenu);
+if (playModeMenu) {
   playModeMenu.addEventListener('click', (e) => {
     const item = e.target.closest('.menu-item');
     if (!item) return;
@@ -2039,6 +2041,30 @@ function captureScreenshot() {
   }, 'image/png');
 }
 
+// === 外观主题切换（浅色 / 深色，默认深色；状态记忆于 persistSettings） ===
+const SUN_ICON = '<circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.77 1.77M17.33 17.33l1.77 1.77M4.9 19.1l1.77-1.77M17.33 6.67l1.77-1.77"/>';
+const MOON_ICON = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+function isLightTheme() { return document.documentElement.dataset.theme === 'light'; }
+function applyAppearance(isLight) {
+  const root = document.documentElement;
+  if (isLight) root.dataset.theme = 'light';
+  else delete root.dataset.theme;
+  // 同步按钮图标与提示：深色→太阳（点击变浅色）；浅色→月亮（点击变深色）
+  const icon = btnAppearance && btnAppearance.querySelector('#icon-appearance-state');
+  if (icon) icon.innerHTML = isLight ? MOON_ICON : SUN_ICON;
+  if (btnAppearance) btnAppearance.title = isLight ? '切换到深色外观' : '切换到浅色外观';
+  // 音乐模式封面光晕的行内背景是主题相关的（深浅各一套衬底），切主题时重算
+  if (isMusicMode && musicCoverImg && musicCoverImg.src && musicCoverImg.style.display !== 'none') {
+    applyCoverGlow(musicCoverImg);
+  }
+}
+if (btnAppearance) {
+  btnAppearance.addEventListener('click', () => {
+    applyAppearance(!isLightTheme());
+    persistSettings();
+  });
+}
+
 // === 全屏与窗口退出/展开 ===
 function toggleFullscreen() {
   // 真正的全屏（主进程 setFullScreen），区别于窗口最大化
@@ -2096,7 +2122,7 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'KeyS':
       e.preventDefault();
-      captureScreenshot();
+      if (!isMusicMode) captureScreenshot(); // 音乐模式无画面可截（按钮已隐藏），避免无意义错误提示
       break;
     case 'F11':
       e.preventDefault();

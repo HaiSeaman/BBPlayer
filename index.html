@@ -11,11 +11,102 @@
       --panel-border: rgba(255, 255, 255, 0.08);
       --panel-border-glow: rgba(0, 242, 254, 0.25);
       --accent-neon: #00f2fe;
+      /* 强调文字色：深色主题用亮青，浅色主题用深青蓝，保证对比度（青色纯色在浅底上不可读） */
+      --accent-text: #00f2fe;
       --accent-gradient: linear-gradient(135deg, #00f2fe 0%, #4facfe 100%);
       --accent-glow: rgba(0, 242, 254, 0.4);
+      --cover-ring: rgba(255, 255, 255, 0.07);
       --text-primary: #f8fafc;
       --text-secondary: #94a3b8;
       --text-muted: #64748b;
+      /* —— 外观主题高级变量（深色为默认值，data-theme="light" 时整体覆盖为浅色系） —— */
+      --titlebar-shadow: 0 1px 6px rgba(0, 0, 0, 0.8), 0 1px 2px rgba(0, 0, 0, 0.6);
+      --titlebar-icon-shadow: rgba(0, 0, 0, 0.7);
+      --ghost-bg: rgba(255, 255, 255, 0.06);
+      --ghost-hover: rgba(255, 255, 255, 0.12);
+      --ghost-hover-border: rgba(255, 255, 255, 0.2);
+      --logo-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+      --empty-logo-fill: rgba(255, 255, 255, 0.05);
+      --empty-logo-stroke: rgba(255, 255, 255, 0.2);
+      --subtitle-shadow: 0 2px 8px rgba(0, 0, 0, 0.9);
+      --music-title-shadow: 0 2px 16px rgba(0, 0, 0, 0.72);
+      --bar-border: rgba(255, 255, 255, 0.2);
+      --shadow-bar: 0 20px 50px rgba(0, 0, 0, 0.65);
+      --ctrl-bg: rgba(255, 255, 255, 0.12);
+      --ctrl-border: rgba(255, 255, 255, 0.2);
+      --ctrl-hover-border: rgba(255, 255, 255, 0.35);
+      --ctrl-text: #ffffff;
+      --ctrl-hover: rgba(0, 242, 254, 0.3);
+      --track-bg: rgba(255, 255, 255, 0.12);
+      --handle-bg: #ffffff;
+      --menu-bg: rgba(14, 17, 23, 0.92);
+      --menu-hover: rgba(255, 255, 255, 0.08);
+      --tooltip-bg: rgba(8, 9, 12, 0.92);
+      --tooltip-text: #ffffff;
+      --subtitle-bg: rgba(8, 9, 12, 0.82);
+      --subtitle-text: #ffffff;
+      --item-hover: rgba(255, 255, 255, 0.05);
+      --win-hover: rgba(255, 255, 255, 0.08);
+      --win-hover-border: rgba(255, 255, 255, 0.12);
+      --shadow-drawer: -10px 0 30px rgba(0, 0, 0, 0.6);
+      --shadow-toast: 0 10px 30px rgba(0, 0, 0, 0.6);
+      --shadow-cover: 0 26px 70px rgba(0, 0, 0, 0.55);
+      --music-bg: radial-gradient(ellipse 130% 95% at 50% 22%, #151f38 0%, #0b1322 58%, #060a13 100%);
+      --music-title: #edf3ff;
+      --music-meta: rgba(198, 214, 240, 0.52);
+      --cover-frame: rgba(255, 255, 255, 0.045);
+      --cover-fallback: rgba(255, 255, 255, 0.5);
+      --logo-bg: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 100%);
+    }
+
+    /* 浅色外观：品牌青蓝渐变保留，中性色反转（浅底深字，确保文字与控件清晰） */
+    :root[data-theme='light'] {
+      --bg-obsidian: #eef2f7;
+      --panel-glass: rgba(255, 255, 255, 0.78);
+      --panel-border: rgba(20, 45, 80, 0.14);
+      --panel-border-glow: rgba(0, 130, 235, 0.35);
+      --accent-text: #0284c7;
+      --cover-ring: rgba(20, 45, 80, 0.12);
+      --text-primary: #101828;
+      --text-secondary: #475467;
+      --text-muted: #98a2b3;
+      --titlebar-shadow: 0 1px 6px rgba(255, 255, 255, 0.78), 0 1px 2px rgba(255, 255, 255, 0.6);
+      --titlebar-icon-shadow: rgba(255, 255, 255, 0.7);
+      --ghost-bg: rgba(255, 255, 255, 0.8);
+      --ghost-hover: rgba(20, 45, 80, 0.1);
+      --ghost-hover-border: rgba(20, 45, 80, 0.25);
+      --logo-shadow: 0 20px 40px rgba(30, 60, 100, 0.16);
+      --empty-logo-fill: rgba(20, 45, 80, 0.06);
+      --empty-logo-stroke: rgba(20, 45, 80, 0.35);
+      --subtitle-shadow: 0 2px 8px rgba(4, 12, 24, 0.18);
+      --music-title-shadow: 0 2px 16px rgba(4, 12, 24, 0.16);
+      --bar-border: rgba(20, 45, 80, 0.18);
+      --shadow-bar: 0 16px 40px rgba(30, 60, 100, 0.18);
+      --ctrl-bg: rgba(255, 255, 255, 0.7);
+      --ctrl-border: rgba(20, 45, 80, 0.16);
+      --ctrl-hover-border: rgba(20, 45, 80, 0.32);
+      --ctrl-text: #101828;
+      --ctrl-hover: rgba(0, 130, 235, 0.14);
+      --track-bg: rgba(20, 45, 80, 0.14);
+      --handle-bg: #14507a;
+      --menu-bg: rgba(255, 255, 255, 0.94);
+      --menu-hover: rgba(20, 45, 80, 0.07);
+      --tooltip-bg: rgba(255, 255, 255, 0.95);
+      --tooltip-text: #101828;
+      --subtitle-bg: rgba(255, 255, 255, 0.88);
+      --subtitle-text: #101828;
+      --item-hover: rgba(20, 45, 80, 0.06);
+      --win-hover: rgba(20, 45, 80, 0.08);
+      --win-hover-border: rgba(20, 45, 80, 0.2);
+      --shadow-drawer: -10px 0 24px rgba(30, 60, 100, 0.16);
+      --shadow-toast: 0 10px 26px rgba(30, 60, 100, 0.18);
+      --shadow-cover: 0 26px 70px rgba(30, 60, 100, 0.28);
+      --music-bg: radial-gradient(ellipse 130% 95% at 50% 22%, #dfe9f6 0%, #eef2f7 58%, #f6f8fb 100%);
+      --music-title: #101828;
+      --music-meta: rgba(71, 84, 103, 0.72);
+      --cover-frame: rgba(255, 255, 255, 0.6);
+      --cover-fallback: rgba(16, 24, 40, 0.4);
+      --logo-bg: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.85) 0%, rgba(255, 255, 255, 0.4) 100%);
     }
 
     * {
@@ -73,7 +164,7 @@
       font-weight: 500;
       z-index: 40;
       border: 1px solid var(--panel-border);
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+      box-shadow: var(--shadow-toast);
       opacity: 0;
       pointer-events: none;
       transition: opacity 0.25s cubic-bezier(0.16, 1, 0.3, 1), transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
@@ -102,7 +193,7 @@
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      background: radial-gradient(ellipse 130% 95% at 50% 22%, #151f38 0%, #0b1322 58%, #060a13 100%);
+      background: var(--music-bg);
       overflow: hidden;
       pointer-events: none;
       transition: background 0.7s ease;
@@ -114,10 +205,10 @@
       height: min(34vh, 280px);
       border-radius: 22px;
       box-shadow:
-        0 26px 70px rgba(0, 0, 0, 0.55),
+        0 26px 70px var(--shadow-cover),
         0 0 90px var(--cover-glow, rgba(64, 128, 255, 0.2)),
-        0 0 0 1px rgba(255, 255, 255, 0.07);
-      background: rgba(255, 255, 255, 0.045);
+        0 0 0 1px var(--cover-ring);
+      background: var(--cover-frame);
       overflow: hidden;
       flex-shrink: 0;
     }
@@ -136,7 +227,7 @@
       align-items: center;
       justify-content: center;
       background: linear-gradient(135deg, rgba(0, 242, 254, 0.14), rgba(79, 172, 254, 0.14));
-      color: rgba(255, 255, 255, 0.5);
+      color: var(--cover-fallback);
     }
     #music-cover-fallback svg {
       width: 92px;
@@ -154,12 +245,12 @@
       font-size: clamp(20px, 3.2vh, 30px);
       font-weight: 650;
       letter-spacing: 0.5px;
-      color: #edf3ff;
+      color: var(--music-title);
       text-align: center;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
-      text-shadow: 0 2px 16px rgba(0, 0, 0, 0.72);
+      text-shadow: var(--music-title-shadow);
     }
 
     /* 元信息行：格式 · 时长（由 JS 填充） */
@@ -168,7 +259,7 @@
       font-size: 13px;
       font-weight: 500;
       letter-spacing: 1.6px;
-      color: rgba(198, 214, 240, 0.52);
+      color: var(--music-meta);
       text-transform: uppercase;
     }
 
@@ -197,14 +288,14 @@
 
     #custom-subtitle-text {
       display: inline-block;
-      background: rgba(8, 9, 12, 0.82);
-      color: #ffffff;
+      background: var(--subtitle-bg);
+      color: var(--subtitle-text);
       padding: 8px 20px;
       border-radius: 10px;
       font-size: 22px;
       font-weight: 500;
       line-height: 1.4;
-      text-shadow: 0 2px 8px rgba(0,0,0,0.9);
+      text-shadow: var(--subtitle-shadow);
       word-wrap: break-word;
       white-space: pre-line;
       box-shadow: 0 8px 24px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(255,255,255,0.1);
@@ -229,6 +320,11 @@
       -webkit-app-region: no-drag;
     }
 
+    #empty-state .brand-logo-container .logo-blob {
+      fill: var(--empty-logo-fill);
+      stroke: var(--empty-logo-stroke);
+    }
+
     #empty-state .brand-logo-container {
       width: 88px;
       height: 88px;
@@ -237,10 +333,10 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      background: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 100%);
+      background: var(--logo-bg);
       border: 1px solid var(--panel-border);
       border-radius: 26px;
-      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+      box-shadow: var(--logo-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.15);
       transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.3s ease;
     }
 
@@ -289,7 +385,7 @@
     }
 
     .btn-ghost {
-      background: rgba(255, 255, 255, 0.06);
+      background: var(--ghost-bg);
       color: var(--text-primary);
       border: 1px solid var(--panel-border);
       padding: 11px 26px;
@@ -302,19 +398,19 @@
     }
 
     .btn-ghost:hover {
-      background: rgba(255, 255, 255, 0.12);
-      border-color: rgba(255, 255, 255, 0.2);
+      background: var(--ghost-hover);
+      border-color: var(--ghost-hover-border);
       transform: translateY(-2px);
     }
 
-    /* 自定义沉浸式无边框标题栏 */
+    /* 自定义沉浸式无边框标题栏（全透明：无毛玻璃底色，仅文字与按键；清晰度由字影/图标投影保障） */
     #titlebar {
       position: absolute;
       top: 0;
       left: 0;
       width: 100%;
       height: 42px;
-      background: linear-gradient(to bottom, rgba(8, 9, 12, 0.85) 0%, rgba(8, 9, 12, 0) 100%);
+      background: transparent;
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -340,6 +436,7 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      text-shadow: var(--titlebar-shadow); /* 透明底上保证文字在任意画面背景下可读 */
     }
 
     .title-logo {
@@ -355,6 +452,7 @@
     .title-logo svg {
       width: 16px;
       height: 16px;
+      filter: drop-shadow(0 1px 2px var(--titlebar-icon-shadow));
     }
 
     #video-title {
@@ -385,6 +483,7 @@
       justify-content: center;
       cursor: pointer;
       transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      filter: drop-shadow(0 1px 2px var(--titlebar-icon-shadow)); /* 透明底上让图标投影可见（hover 背景仍正常显示） */
     }
 
     .win-btn svg {
@@ -398,8 +497,8 @@
     }
 
     .win-btn:hover {
-      background: rgba(255, 255, 255, 0.08);
-      border-color: rgba(255, 255, 255, 0.12);
+      background: var(--win-hover);
+      border-color: var(--win-hover-border);
       color: var(--text-primary);
     }
 
@@ -420,9 +519,9 @@
       max-width: 900px;
       padding: 14px 20px;
       background: var(--panel-glass);
-      border: 1px solid rgba(255, 255, 255, 0.2);
+      border: 1px solid var(--bar-border);
       border-radius: 20px;
-      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+      box-shadow: var(--shadow-bar), inset 0 1px 0 rgba(255, 255, 255, 0.15);
       display: flex;
       flex-direction: column;
       gap: 12px;
@@ -444,7 +543,7 @@
       position: relative;
       width: 100%;
       height: 4px;
-      background: rgba(255, 255, 255, 0.12);
+      background: var(--track-bg);
       border-radius: 2px;
       cursor: pointer;
       transition: height 0.2s cubic-bezier(0.16, 1, 0.3, 1);
@@ -473,7 +572,7 @@
       transform: translateY(-50%);
       width: 12px;
       height: 12px;
-      background: #ffffff;
+      background: var(--handle-bg);
       border-radius: 50%;
       box-shadow: 0 0 10px var(--accent-neon);
       opacity: 0;
@@ -490,9 +589,9 @@
       position: absolute;
       bottom: 18px;
       transform: translateX(-50%);
-      background: rgba(8, 9, 12, 0.92);
+      background: var(--tooltip-bg);
       backdrop-filter: blur(12px);
-      color: #fff;
+      color: var(--tooltip-text);
       padding: 4px 10px;
       border-radius: 6px;
       font-size: 11px;
@@ -518,9 +617,9 @@
     }
 
     .ctrl-btn {
-      background: rgba(255, 255, 255, 0.12);
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      color: #ffffff;
+      background: var(--ctrl-bg);
+      border: 1px solid var(--ctrl-border);
+      color: var(--ctrl-text);
       font-size: 14px;
       font-weight: 500;
       cursor: pointer;
@@ -547,15 +646,15 @@
     }
 
     .ctrl-btn:hover {
-      background: rgba(255, 255, 255, 0.25);
-      border-color: rgba(255, 255, 255, 0.35);
-      color: #ffffff;
+      background: var(--ctrl-hover);
+      border-color: var(--ctrl-hover-border);
+      color: var(--ctrl-text);
       box-shadow: 0 4px 12px rgba(0, 242, 254, 0.3);
       transform: translateY(-1px) scale(1.04);
     }
 
     .ctrl-btn.active {
-      color: var(--accent-neon);
+      color: var(--accent-text);
       background: rgba(0, 242, 254, 0.12);
     }
 
@@ -614,7 +713,7 @@
       bottom: 42px;
       left: 50%;
       transform: translateX(-50%) translateY(8px);
-      background: rgba(14, 17, 23, 0.92);
+      background: var(--menu-bg);
       border: 1px solid var(--panel-border);
       border-radius: 12px;
       padding: 6px;
@@ -648,13 +747,13 @@
     }
 
     .menu-item:hover {
-      background: rgba(255, 255, 255, 0.08);
+      background: var(--menu-hover);
       color: var(--text-primary);
     }
 
     .menu-item.active {
       background: rgba(0, 242, 254, 0.15);
-      color: var(--accent-neon);
+      color: var(--accent-text);
       font-weight: 600;
     }
 
@@ -684,7 +783,7 @@
     }
 
     .resume-btn {
-      color: var(--accent-neon);
+      color: var(--accent-text);
       font-weight: 600;
       cursor: pointer;
       text-decoration: underline;
@@ -712,7 +811,7 @@
       display: flex;
       flex-direction: column;
       transition: right 0.35s cubic-bezier(0.16, 1, 0.3, 1);
-      box-shadow: -10px 0 30px rgba(0,0,0,0.6);
+      box-shadow: var(--shadow-drawer);
     }
 
     #playlist-panel.open {
@@ -741,7 +840,7 @@
 
     .playlist-count {
       font-size: 12px;
-      color: var(--accent-neon);
+      color: var(--accent-text);
       font-weight: 500;
     }
 
@@ -778,13 +877,13 @@
     }
 
     .playlist-item:hover {
-      background: rgba(255, 255, 255, 0.05);
+      background: var(--item-hover);
       color: var(--text-primary);
     }
 
     .playlist-item.active {
       background: rgba(0, 242, 254, 0.12);
-      color: var(--accent-neon);
+      color: var(--accent-text);
       font-weight: 500;
     }
 
@@ -910,7 +1009,7 @@
               <stop offset="100%" stop-color="#4FACFE"/>
             </linearGradient>
           </defs>
-          <path d="M180 140 C180 140, 290 140, 340 190 C380 230, 360 280, 310 300 C370 320, 380 380, 320 420 C270 450, 180 450, 180 450 Z" fill="rgba(255, 255, 255, 0.05)" stroke="rgba(255, 255, 255, 0.2)" stroke-width="6"/>
+          <path class="logo-blob" d="M180 140 C180 140, 290 140, 340 190 C380 230, 360 280, 310 300 C370 320, 380 380, 320 420 C270 450, 180 450, 180 450 Z" fill="rgba(255, 255, 255, 0.05)" stroke="rgba(255, 255, 255, 0.2)" stroke-width="6"/>
           <path d="M210 170 L340 256 L210 342 Z" fill="url(#emptyNeon)"/>
         </svg>
       </div>
@@ -985,6 +1084,14 @@
         </div>
 
         <div class="controls-right">
+          <!-- 外观主题切换（浅色 / 深色）：位于播放模式按键左手边 -->
+          <button class="ctrl-btn" id="btn-appearance" title="切换到浅色外观" aria-label="切换外观主题">
+            <svg viewBox="0 0 24 24" id="icon-appearance-state">
+              <!-- 深色主题默认显示太阳（点击切浅色）；浅色主题由 JS 换为月亮 -->
+              <circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.77 1.77M17.33 17.33l1.77 1.77M4.9 19.1l1.77-1.77M17.33 6.67l1.77-1.77"/>
+            </svg>
+          </button>
+
           <!-- 播放模式控制菜单 -->
           <div class="menu-popover-container">
             <button class="ctrl-btn" id="btn-play-mode" title="播放模式">

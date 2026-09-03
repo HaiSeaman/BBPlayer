@@ -60,25 +60,27 @@ function createTray() {
 }
 
 const VIDEO_EXTS = require('./shared-video-exts');
-const videoExtensions = new Set(VIDEO_EXTS.map(ext => '.' + ext));
+const videoExtensions = new Set(VIDEO_EXTS.all.map(ext => '.' + ext));
 
+// 解析命令行/"打开方式"传入的媒体文件路径（支持一次多个文件，按序返回绝对路径数组）。
+// Windows 下开发环境 Electron 命令行参数通常为：[electron.exe, ., path/to/file]
+// 打包后的生产环境为：[app.exe, path/to/file] 或包含各种开关参数
 function parseFilePathFromArgs(argv) {
-  if (!argv || !Array.isArray(argv)) return null;
-  // Windows下开发环境 Electron 命令行参数通常为：[electron.exe, ., path/to/file]
-  // 打包后的生产环境为：[app.exe, path/to/file] 或包含各种开关参数
+  if (!argv || !Array.isArray(argv)) return [];
+  const results = [];
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i];
     if (arg && !arg.startsWith('--')) {
       const ext = path.extname(arg).toLowerCase();
       if (videoExtensions.has(ext) && fs.existsSync(arg)) {
-        return path.resolve(arg);
+        results.push(path.resolve(arg));
       }
     }
   }
-  return null;
+  return results;
 }
 
-let initialFilePath = parseFilePathFromArgs(process.argv);
+let initialFilePaths = parseFilePathFromArgs(process.argv); // 冷启动传入的媒体文件（数组，可为空）
 
 // 防止多开应用（保证极轻开销）
 const gotTheLock = app.requestSingleInstanceLock();
@@ -86,14 +88,17 @@ if (!gotTheLock) {
   app.quit();
 } else {
   app.on('second-instance', (event, commandLine) => {
-    // 运行中再次打开视频文件：直接在独立新窗口播放，实现多视频同时播放；
-    // 无文件参数（如重复双击 exe）则唤起/显示主窗口（隐藏到托盘时也要重新显示）
-    const filePath = parseFilePathFromArgs(commandLine);
-    if (filePath) {
-      createPlayerWindow({ isMain: false, initialFile: filePath });
-      return;
-    }
-    showMainWindow();
+    // 运行中再次打开视频文件：多文件逐个开独立窗口播放（复用现有新窗口机制，天然处理加载时序）；
+    // 无文件参数（如重复双击 exe）则唤起/显示主窗口（隐藏到托盘时也要重新显示）。
+    // 延迟到 ready 后再建窗：开机自启期双实例竞争时 app 可能尚未就绪，直接 new BrowserWindow 会抛异常崩溃。
+    app.whenReady().then(() => {
+      const filePaths = parseFilePathFromArgs(commandLine);
+      if (filePaths.length > 0) {
+        for (const p of filePaths) createPlayerWindow({ isMain: false, initialFile: p });
+        return;
+      }
+      showMainWindow();
+    });
   });
 }
 
@@ -122,10 +127,14 @@ function loadWindowState() {
   return null;
 }
 
-// 播放器窗口工厂：主窗口与“新窗口”弹窗共用同一套无边框窗口/事件逻辑。
+// 记录"程序化自动贴合尺寸"的窗口：resize-window-to-video 的自动 setSize 引发的 resize 不写进
+// 窗口状态记忆（避免覆盖用户手动调整的偏好尺寸）。用户手势拉伸（will-resize）时移出该集合。
+const programmaticResizeWindows = new WeakSet();
+
+// 播放器窗口工厂：主窗口与"新窗口"弹窗共用同一套无边框窗口/事件逻辑。
 // isMain 决定是否记忆窗口状态；initialFile 为弹窗指定立即播放的文件。
 function createPlayerWindow(options = {}) {
-  const { isMain = false, initialFile = null } = options;
+  let { isMain = false, initialFile = null } = options;
   const savedState = isMain ? loadWindowState() : null;
 
   const win = new BrowserWindow({
@@ -163,6 +172,11 @@ function createPlayerWindow(options = {}) {
     }
   }
 
+  // 恢复最大化状态（旧存档无 maximized 字段则为 undefined，自动跳过，向前兼容）
+  if (isMain && savedState && savedState.maximized) {
+    win.maximize();
+  }
+
   // 纳入 IPC 信任面，窗口关闭时移除
   playerWindows.add(win);
   win.on('closed', () => {
@@ -176,9 +190,14 @@ function createPlayerWindow(options = {}) {
   win.webContents.on('did-finish-load', () => {
     if (initialFile) {
       win.webContents.send('open-file', initialFile);
-    } else if (isMain && initialFilePath) {
-      win.webContents.send('open-file', initialFilePath);
-      initialFilePath = null;
+      initialFile = null; // 一次性消费：页面重载（如崩溃恢复）不重复投喂
+    } else if (isMain && initialFilePaths && initialFilePaths.length > 0) {
+      win.webContents.send('open-file', initialFilePaths[0]);
+      // 冷启动多文件：首个给主窗口播放，其余开独立弹窗
+      for (let i = 1; i < initialFilePaths.length; i++) {
+        createPlayerWindow({ isMain: false, initialFile: initialFilePaths[i] });
+      }
+      initialFilePaths = null;
     }
   });
 
@@ -219,29 +238,38 @@ function createPlayerWindow(options = {}) {
   });
 
   // 用户手动拖拽窗口边缘时解除视频宽高比锁定（程序化 setSize 不触发 will-resize，
-  // 因此换片自动贴合不受影响）；下次加载新视频时会重新锁定
+  // 因此换片自动贴合不受影响）；下次加载新视频时会重新锁定。
+  // 同时标记：此 resize 来自用户手势，可写入窗口状态记忆（程序化 setSize 不可写）
   win.on('will-resize', () => {
     if (win && !win.isDestroyed()) {
+      programmaticResizeWindows.delete(win);
       win.setAspectRatio(0);
     }
   });
 
   // 仅主窗口记忆窗口大小/位置（弹窗每次级联展开，不做持久化）
   if (isMain) {
-    // 窗口大小/位置变化时保存状态（防抖，全屏时不记录）
+    // 窗口大小/位置变化时保存状态（防抖，全屏时不记录）。
+    // 最大化时落盘 getNormalBounds()（恢复后的正常边界）而非工作区整块，
+    // 并附带 maximized 标志供下次启动恢复，避免"伪最大化"占满屏幕。
     let stateSaveTimer = null;
+    const writeWindowState = () => {
+      if (!win || win.isDestroyed() || win.isFullScreen()) return;
+      try {
+        const bounds = win.isMaximized() ? win.getNormalBounds() : win.getBounds();
+        fs.writeFileSync(windowStateFile, JSON.stringify({ ...bounds, maximized: win.isMaximized() }), 'utf8');
+      } catch (e) {
+        // 忽略写入失败
+      }
+    };
     const scheduleStateSave = () => {
       if (!win || win.isDestroyed() || win.isFullScreen()) return;
       if (stateSaveTimer) clearTimeout(stateSaveTimer);
-      stateSaveTimer = setTimeout(() => {
-        try {
-          fs.writeFileSync(windowStateFile, JSON.stringify(win.getBounds()), 'utf8');
-        } catch (e) {
-          // 忽略写入失败
-        }
-      }, 400);
+      stateSaveTimer = setTimeout(writeWindowState, 400);
     };
-    win.on('resize', scheduleStateSave);
+    // resize 仅用户手势（will-resize 移出 programmaticResizeWindows）时落盘；
+    // 换片自动贴合尺寸（程序化 setSize）不写进记忆，避免覆盖用户偏好尺寸
+    win.on('resize', () => { if (!programmaticResizeWindows.has(win)) scheduleStateSave(); });
     win.on('move', scheduleStateSave);
 
     // 主窗口"关闭"行为=隐藏到托盘（常驻后台，音乐/视频继续播放）；
@@ -257,13 +285,7 @@ function createPlayerWindow(options = {}) {
         clearTimeout(stateSaveTimer);
         stateSaveTimer = null;
       }
-      if (win && !win.isDestroyed() && !win.isFullScreen()) {
-        try {
-          fs.writeFileSync(windowStateFile, JSON.stringify(win.getBounds()), 'utf8');
-        } catch (err) {
-          // 忽略写入失败
-        }
-      }
+      writeWindowState();
     });
   }
 
@@ -392,12 +414,12 @@ ipcMain.handle('file:findCover', (event, filePath) => {
   return null;
 });
 
-// 获取应用冷启动时传入的文件路径
-ipcMain.handle('app:getInitialFile', (event) => {
+// 媒体扩展名下发（单一事实来源 shared-video-exts.js）：
+// preload 处于沙箱无法 require 本地模块，渲染进程经此一次性获取与主进程完全一致的数据。
+// 冷启动/运行的传入文件统一走 did-finish-load 的 'open-file' 事件，无第二通道。
+ipcMain.handle('app:getVideoExtensions', (event) => {
   if (!isTrustedSender(event)) return null;
-  const filePath = initialFilePath;
-  initialFilePath = null;
-  return filePath;
+  return VIDEO_EXTS;
 });
 
 // 打开本地视频文件对话框（支持多选）
@@ -408,8 +430,8 @@ ipcMain.handle('dialog:openFile', async (event) => {
     title: '选择本地媒体文件',
     properties: ['openFile', 'multiSelections'],
     filters: [
-      { name: '媒体文件', extensions: VIDEO_EXTS },
-      { name: '音频文件', extensions: ['mp3', 'flac', 'wav', 'ogg', 'm4a', 'aac'] },
+      { name: '媒体文件', extensions: VIDEO_EXTS.all },
+      { name: '音频文件', extensions: VIDEO_EXTS.audio },
       { name: '所有文件', extensions: ['*'] }
     ]
   });
@@ -632,6 +654,7 @@ ipcMain.handle('resize-window-to-video', (event, payload) => {
     }
   }
 
+  programmaticResizeWindows.add(win); // 程序化贴合尺寸：引发的 resize 不写进窗口状态记忆
   win.setAspectRatio(lockAspect ? aspectRatio : 0); // setAspectRatio(0) 取消锁定
   win.setSize(targetWidth, targetHeight);
   return true;
