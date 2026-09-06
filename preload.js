@@ -37,6 +37,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 读取本地文本文件（字幕，主进程已做扩展名白名单 + 编码检测）
   readTextFile: (filePath) => ipcRenderer.invoke('file:readText', filePath),
 
+  // 解码拖入字幕文件的原始字节（ArrayBuffer；与 readTextFile 共用主进程同一套编码嗅探实现）
+  decodeSubtitleBuffer: (data) => ipcRenderer.invoke('file:decodeSubtitle', data),
+
   // 保存图片截图到本地（ArrayBuffer 载荷，避免大图 base64 膨胀）
   saveScreenshot: (data, defaultName) => ipcRenderer.invoke('dialog:saveScreenshot', { data, defaultName }),
 

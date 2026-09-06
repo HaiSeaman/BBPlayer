@@ -274,7 +274,7 @@
       opacity: 0.92;
     }
 
-    /* 外挂字幕显示区 */
+    /* 外挂字幕显示区（bottom 为静态值，无位移逻辑，不需要过渡动画） */
     #custom-subtitle-overlay {
       position: absolute;
       bottom: 90px;
@@ -283,7 +283,6 @@
       text-align: center;
       pointer-events: none;
       z-index: 15;
-      transition: bottom 0.3s cubic-bezier(0.16, 1, 0.3, 1);
     }
 
     #custom-subtitle-text {
@@ -403,7 +402,9 @@
       transform: translateY(-2px);
     }
 
-    /* 自定义沉浸式无边框标题栏（全透明：无毛玻璃底色，仅文字与按键；清晰度由字影/图标投影保障） */
+    /* 自定义沉浸式无边框标题栏（全透明通栏：无毛玻璃底色，仅文字与按键；清晰度由字影/图标投影保障）。
+       颜色对齐契约：文字/按键/悬停/投影全部取自主题变量（--text-*、--win-*、--titlebar-*），
+       与底部功能栏共用同一套深浅色板——切换主题时顶部随之同步变色，不允许出现写死的主题色 */
     #titlebar {
       position: absolute;
       top: 0;
@@ -417,7 +418,7 @@
       padding: 0 14px 0 18px;
       z-index: 20;
       -webkit-app-region: drag;
-      transition: opacity 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      transition: opacity 0.12s ease-out; /* 近瞬时过渡：跟随鼠标弹出/收起，无"慢半拍"感 */
       opacity: 1;
     }
 

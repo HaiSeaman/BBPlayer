@@ -9,14 +9,14 @@
 
 ```
 BBPlayer/
-├── main.js               # Electron 主进程：多窗口工厂/状态记忆、系统托盘、IPC 信任面、文件对话框、目录扫描
+├── main.js               # Electron 主进程：多窗口工厂/状态记忆、IPC 信任面、文件对话框、目录扫描
 ├── preload.js            # 预加载脚本：contextBridge 暴露 electronAPI（渲染进程唯一系统入口）
 ├── renderer.js           # 渲染层全部业务逻辑（约 2200 行，单文件策略，每窗口一份独立实例）
 ├── index.html            # 界面结构 + 全部内联 CSS（毛玻璃视觉 + 音乐播放效果层，单文件免额外请求）
 ├── shared-video-exts.js  # 媒体扩展名单一事实来源：结构化 { video, audio, all }
 ├── verify-exts.js        # 扩展名一致性对账脚本（shared-video-exts ↔ package.json fileAssociations）
 ├── run-test.bat          # 源码方式启动测试（自动检测 Node/Electron 环境）
-├── build/                # 打包图标（ico/png，同时用作系统托盘图标）
+├── build/                # 打包图标（ico/png，用作窗口与安装包图标）
 └── package.json          # 元数据 + electron-builder 配置
 ```
 
@@ -36,7 +36,7 @@ preload（沙箱无法 require 本地模块）与渲染进程经 IPC `app:getVid
 
 | 元素 | 唤出条件 | 隐藏条件 |
 |---|---|---|
-| 顶部标题栏 `#titlebar` | 鼠标进入顶部感应区（`TITLEBAR_HOTZONE_HEIGHT`=56px）、或点击视频画面 | 离开顶部感应区且未按住鼠标拖动 → **延迟 0.4 秒隐藏**；或播放中 3 秒无操作（兜底）；**空状态与暂停时常驻** |
+| 顶部标题栏 `#titlebar` | 鼠标进入顶部感应区（`TITLEBAR_HOTZONE_HEIGHT`=56px）、或点击视频画面 | 已加载媒体（播放或暂停）：离开顶部感应区且未按住鼠标拖动 → **立即隐藏**；或播放中 3 秒无操作（兜底）；**空状态（无媒体）常驻** |
 | 底部功能栏 `#controls-overlay` | 鼠标进入底部感应区（离底边 ≤ `CONTROLS_HOTZONE_HEIGHT`=120px）或悬停其上 | 移开感应区且不在功能栏上 → **立即隐藏**；或播放中 3 秒无操作（兜底） |
 
 核心设计与状态控制函数（renderer.js 尾部）：
@@ -45,8 +45,10 @@ preload（沙箱无法 require 本地模块）与渲染进程经 IPC `app:getVid
   - **性能关键**：单次 mousemove 仅执行 1 次 `getBoundingClientRect()`，顶部与底部感应区共用 Rect，杜绝多次 Forced Reflow；
 - `isPointerOverControlBar(e)` — 用 `e.target.closest('#controls-overlay')` 判断功能栏悬停（包含其弹出子菜单）；
 - `isPointerOverTitleBar(e)` — 用 `e.target.closest('#titlebar')` 判断鼠标悬停或拖拽按住标题栏；
-- `isImmersiveMode()` — 判断是否处于沉浸模式（有视频且处于播放中状态）；非沉浸模式下标题栏强制常驻；
-- `scheduleHideTitleBar()` — 400ms 去抖延时隐藏，防止鼠标划过顶部边缘时剧烈闪烁；
+- `isImmersiveMode()` — 判断是否处于沉浸模式（有媒体且播放中），仅决定是否启用 3 秒闲置兜底；
+- `hasMediaLoaded()` — 是否已加载媒体（播放或暂停）；移开即隐以此为条件，空状态（无媒体）标题栏常驻，
+  保证空窗口始终有最小化/关闭按键可用；
+- `clearTitlebarIdleTimer()` — 清闲置兜底计时器（`hideTitleBarNow`/`showTitleBar`/悬停分支共用）；
 - 拖拽安全防护：`e.buttons !== 0` 且在标题栏上时不隐藏，确保无边框拖拽（`-webkit-app-region: drag`）不脱手。
 
 ### 2. 视频画面拖拽窗口 + 单击播放手势
@@ -69,8 +71,9 @@ preload（沙箱无法 require 本地模块）与渲染进程经 IPC `app:getVid
 `lastRenderedSubText` 缓存避免每帧无效 DOM 写入；SRT/VTT 内联标签
 （`<i>` `<font>` 等）由 `stripInlineTags()` 剥离（仅匹配字母开头标签，避免误删正文比较符号）。
 
-**编码嗅探管线**（v1.4.1 新增）：主进程 `file:readText` 与渲染进程拖拽路径共用同一套
-`decodeSubtitleBuffer()` 逻辑（两份实现，注意保持同步）：
+**编码嗅探管线**（v1.4.1 新增；当前工作区收敛为单一实现）：唯一实现在主进程
+`decodeSubtitleBuffer()`，渲染端拖入字幕经新增 IPC `file:decodeSubtitle`（ArrayBuffer 载荷，
+10MB 上限）交主进程解码——曾为两份实现手工同步，已按瘦身审查合并：
 UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法字节即抛错）→ GBK 回退 → latin1 兜底。
 覆盖中文环境最常见的 ANSI(GBK) 老字幕。主进程读取有 10MB 上限（`MAX_SUBTITLE_BYTES`）。
 
@@ -187,28 +190,24 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
    （Ambient 风格，每首歌背景色不同）；canvas 受限时 try/catch 保留默认深色背景。
 5. **令牌防串台**：`musicCoverToken` 令牌 + 闭包捕获，快速切歌时旧封面加载结果一律丢弃。
 
-### 13. 系统托盘常驻与窗口行为策略（v1.5.0 新增）
+### 13. 窗口关闭与退出策略（v1.5.0 曾为托盘常驻，现已改为关闭即退出）
 
-**目标**：点关闭不退出程序，收进系统托盘继续后台播放；最小化策略按视频/音频分流。
+**目标**：主窗口点"关闭"直接退出软件；最小化策略按视频/音频分流。
 
 **核心设计**：
 
-1. **托盘**：`Tray`（build/icon.ico，兜底 icon.png）+ `Menu`（打开界面 / 关闭软件）。
-   Windows 设置 `setContextMenu` 后 click/double-click 事件不触发，故改手动弹出：
-   - 左键单击：延迟 260ms 判定（让出双击机会）后 `popUpContextMenu`；
-   - 左键双击：立即 `showMainWindow()`（并清除挂起的单击计时器）；
-   - **右键**：立即弹菜单（无双击语义）。
-2. **关闭拦截**：主窗口 `win.on('close')` 在 `!isQuitting` 时 `preventDefault() + win.hide()`；
-   `app.on('before-quit')` 置 `isQuitting = true` 放行真正退出（托盘"关闭软件"/系统关机路径）。
-3. **隐藏-显示事件转发**：`win.on('hide'/'show')` 复用 `window-minimized`/`window-restored`
-   消息通道，渲染进程按 `isMusicMode` 决策：**视频暂停、纯音频继续后台播放**
+1. **关闭即退出**：主窗口 `win.on('close')` 不再拦截（托盘常驻模式已移除，`Tray`/`isQuitting`
+   相关代码全部删除）；关闭前取消挂起的防抖保存并强制落盘一次 `window-state.json`。
+2. **退出链路**：`window-all-closed` 无条件 `app.quit()`——最后一个窗口关闭（含主窗口点"关闭"）
+   即结束进程；系统关机路径无需特殊处理（无拦截）。
+3. **最小化-恢复事件转发**：`win.on('minimize'/'restore')` 发送 `window-minimized`/`window-restored`
+   消息，渲染进程按 `isMusicMode` 决策：**视频暂停、纯音频继续后台播放**
    （`backgroundThrottling: false` 保证后台不卡顿）。
-4. **常驻守护**：`window-all-closed` 仅在 `isQuitting` 时退出进程；即使窗口全部意外关闭，
-   托盘仍在，`showMainWindow()` 可随时重建主窗口（含 `second-instance` 双击唤起场景）。
-5. **窗口状态**：隐藏不销毁窗口（bounds 状态在内存），真正退出时才落盘 `window-state.json`。
-   落盘使用 `win.getNormalBounds()`（最大化时取恢复后边界）+ `maximized` 标志，启动时恢复最大化，
-   避免"伪最大化"占满工作区；程序化自动贴合（`resize-window-to-video` 的 setSize）经
-   `programmaticResizeWindows`（WeakSet）标记后不再触发状态记忆，避免覆盖用户手调尺寸。
+4. **second-instance 唤起**：运行中再次双击 exe（无文件参数）时 `showMainWindow()` 恢复/前置主窗口。
+5. **窗口状态**：仅主窗口持久化窗口状态；落盘使用 `win.getNormalBounds()`（最大化时取恢复后边界）
+   + `maximized` 标志，启动时恢复最大化，避免"伪最大化"占满工作区；程序化自动贴合
+   （`resize-window-to-video` 的 setSize）经 `programmaticResizeWindows`（WeakSet）标记后不再触发
+   状态记忆，避免覆盖用户手调尺寸。
 
 ---
 
@@ -236,25 +235,71 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 
 ---
 
-### 15. 标题栏透明化与品牌图标（v1.5.1）
+### 15. 标题栏透明化与品牌图标（v1.5.1；其后复核颜色主题对齐）
 
-**标题栏**：`#titlebar` 的 `background` 由渐隐毛玻璃色带（`--titlebar-bg`，已删除）改为 `transparent`；
-文字可读性由 `--titlebar-shadow`（text-shadow，深黑/浅白两套）与 `--titlebar-icon-shadow`
-（`drop-shadow`，作用于 `.title-logo svg` 与 `.win-btn`）兜底；`-webkit-app-region: drag`
-拖拽区与透明背景无关，行为不变。
+**标题栏**：`#titlebar` 保持 v1.5.1 的全透明通栏形态（无毛玻璃底色，仅文字与按键，清晰度由
+`--titlebar-shadow`（text-shadow，深黑/浅白两套）与 `--titlebar-icon-shadow`（`drop-shadow`，
+作用于 `.title-logo svg` 与 `.win-btn`）兜底；`-webkit-app-region: drag` 拖拽区与透明背景无关）。
+**颜色主题契约**：顶栏文字/按键/悬停/投影全部取自主题变量（`--text-*`/`--win-*`/`--titlebar-*`），
+与底部功能栏共用同一套 `:root` 深浅色板——切换主题时顶部同步变色；不允许在顶栏写死主题相关颜色
+（仅品牌 Logo 渐变与关闭键悬停红为固定品牌色）。曾试验的"玻璃浮岛"方案经用户反馈否决已回退，
+恢复原形状，仅保留颜色跟随主题这一诉求。
 
 **品牌图标**：`build/icon.png`（512px 高清）与 `build/icon.ico`（16/24/32/48/64/128/256
 八尺寸 PNG 条目）为"彩色播放键"：青→蓝→紫三段渐变 + 左缘玻璃高光带 + 半透明深蓝描边 +
 全透明底。素材由一次性 PowerShell + System.Drawing 抗锯齿绘制生成（脚本未入库，产物已固化；
 如需重绘可参照几何参数：三角形 (0.20,0.15)/(0.20,0.85)/(0.80,0.50) 归一坐标，渐变 #00E5FF→#3B9DF6→#8B5CF6）。
-图标出口覆盖：应用窗口/任务栏（icon.png → BrowserWindow.icon）、系统托盘与打包 EXE
-资源（icon.ico → Tray / electron-builder win.icon）、文件关联（默认跟随应用图标）。
+图标出口覆盖：应用窗口/任务栏（icon.png → BrowserWindow.icon）与打包 EXE
+资源（icon.ico → electron-builder win.icon）、文件关联（默认跟随应用图标）。
 
 ---
 
 ## 三、版本变更明细
 
-### v1.5.1（当前工作区）——双主题外观 + 品牌图标 + 标题栏透明化 + 工程重构与正确性加固
+### v1.5.2——关闭即退出 + 标题栏跟随鼠标即时显隐 + 全量审查修复与瘦身
+
+#### A. 窗口行为策略改版（用户需求）
+
+1. **关闭即退出**：主窗口 `win.on('close')` 取消拦截（托盘常驻整套机制删除：`Tray`/`isQuitting`/
+   `before-quit`/hide-show 事件转发）；`window-all-closed` 无条件 `app.quit()`；close 时取消挂起
+   防抖并强制落盘 `window-state.json`。多窗口语义不变：主窗口关闭而弹窗存活时应用不退出。
+2. **标题栏跟随鼠标即时显隐**：删除 400ms 延迟隐藏（`scheduleHideTitleBar`/`titlebarHideTimer`
+   移除），移出热区 → `hideTitleBarNow()` 本帧收起；CSS 过渡 0.3s → 0.12s。
+3. **唤出不要求播放状态**（修复旧 BUG：暂停中隐藏的标题栏无法唤出）；收起条件为
+   `hasMediaLoaded()`（播放或暂停），空状态（无媒体）常驻保证窗口按键可用；新增
+   `videoContainer` `mouseleave` 离窗兜底（`e.buttons > 0` 拖拽豁免）。
+4. **主题色对齐复核**：曾试验"玻璃浮岛"标题栏方案被用户否决，完整回退为全透明通栏 42px 原形状；
+   顶栏颜色确认 100% 走主题变量（与底部功能栏同一色板），`TITLEBAR_HOTZONE_HEIGHT` 回归 56。
+
+#### B. 发布前全量审查修复（8 项正确性）
+
+1. **最小化恢复续播失效（高危）**：`onWindowRestored` 条件 `!video.paused` 在"最小化时主动暂停"
+   场景下恒假，续播整体失效 → 改为 `video.paused && !video.ended`。
+2. **播完 1s 内手动重播被强切下一集**：`ended` 的 `autoNextTimer` 未被手动重播作废 → `play`
+   事件监听器统一 `clearAutoNextTimer()`（幂等，覆盖按钮/空格/画面点击全部路径）。
+3. **音乐封面环境光静默失效**：file:// 页面对 file:// 图像 `getImageData` 必然跨域污染抛
+   SecurityError → `file:findCover` 命中时优先返回 `data:` URL（≤8MB，`MAX_COVER_BYTES`），
+   同源可采样；超大回退 file://（仅采样走兜底背景）。
+4. **启动空字幕横条**：`restoreSettings` 抢置 `display:block` → 删除，显隐统一由
+   `renderSubtitlesAt` 裁决。
+5. **时长守卫口径统一**：新增 `hasSeekableDuration()`，timeupdate/hover 预览/seek 三处共用
+   （Infinity/NaN 一律不可 seek）。
+6. **字幕偏移提示矛盾文案**（"延后 -1.5s"）→ `showSubtitleOffsetToast()` 按最终偏移方向描述。
+7. **死防御清理**：`document.fullscreenElement` 恒 null（原生全屏无元素全屏），全屏禁拖由主进程
+   `window-move` 兜底，渲染端误设防删除并注释指明防线。
+8. **字幕编码嗅探收敛为单一实现**：渲染端 `decodeSubtitleBuffer` 副本删除，拖入字幕经新增 IPC
+   `file:decodeSubtitle`（ArrayBuffer 载荷，10MB 上限，受信校验）交主进程解码，消除双份"保持同步"隐患。
+
+#### C. 冗余瘦身（10 项，净 -27 行）
+
+`showControls` 闲置兜底复用 `hideControlsNow`；历史条目点击两处恒真守卫与不可达分支删除；
+频谱画布 style 尺寸与 CSS 等价代码删除；音量钳制三份收敛为 `applyMasterVolume` 单一出口；
+`transparent: false` 默认值噪声、`scanDirectorySafe` 冗余参数、死 CSS 过渡、`run-test.bat`
+冗余 `enabledelayedexpansion` 等全量清零。
+
+---
+
+### v1.5.1——双主题外观 + 品牌图标 + 标题栏透明化 + 工程重构与正确性加固
 
 #### A. 双主题外观（用户需求，新功能）
 
@@ -422,7 +467,7 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
   - 音量滑块在超过 100% 后自动切换为醒目的**霓虹橙色**发光样式，视觉反馈清晰明确；
   - 完美向下兼容旧版播放器存档配置。
 
-### v1.4.1（当前工作区，未提交）——全量代码审查修复
+### v1.4.1——全量代码审查修复
 
 > 本版源于一次覆盖 main.js / preload.js / renderer.js / index.html 的全量审查，
 > 21 项问题全部修复；修复过程中二次复查又抓出并解决了 1 个施工中引入的竞态。

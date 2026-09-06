@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, screen, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -11,11 +11,7 @@ app.commandLine.appendSwitch('disable-extensions');
 let mainWindow = null; // 主窗口引用（second-instance 路由与窗口状态记忆使用）
 const playerWindows = new Set(); // 全部受信任播放器窗口（主窗口 + 新窗口弹窗），IPC 信任面
 
-// === 系统托盘常驻模式：主窗口点"关闭"改为隐藏到托盘，音乐/视频均在后台继续（配合 backgroundThrottling:false） ===
-let tray = null; // 托盘实例（防 GC）
-let isQuitting = false; // 真正退出标志：为 true 时窗口 close 不再拦截（托盘菜单"关闭软件"与系统关机路径）
-
-// 显示/唤起主窗口（隐藏或最小化时恢复）；已销毁则重建
+// 显示/唤起主窗口（最小化时恢复）；已销毁则重建
 function showMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) {
     mainWindow = createPlayerWindow({ isMain: true });
@@ -24,39 +20,6 @@ function showMainWindow() {
   if (mainWindow.isMinimized()) mainWindow.restore();
   if (!mainWindow.isVisible()) mainWindow.show();
   mainWindow.focus();
-}
-
-// 创建系统托盘：单击图标弹出菜单（打开界面/关闭软件），双击图标直接打开界面
-function createTray() {
-  let icon = nativeImage.createFromPath(path.join(__dirname, 'build/icon.ico'));
-  if (icon.isEmpty()) icon = nativeImage.createFromPath(path.join(__dirname, 'build/icon.png'));
-  tray = new Tray(icon);
-  tray.setToolTip('BBPlayer 媒体播放器');
-  const menu = Menu.buildFromTemplate([
-    { label: '打开界面', click: () => showMainWindow() },
-    { type: 'separator' },
-    { label: '关闭软件', click: () => { isQuitting = true; app.quit(); } }
-  ]);
-  // Windows 上设置 context menu 后 click/double-click 事件不触发，故改手动弹出。
-  // 单击/双击区分：单击延迟 260ms 判定（等不及第二次点击才算单击），双击立即打开。
-  let trayClickTimer = null;
-  tray.on('click', () => {
-    if (trayClickTimer) { clearTimeout(trayClickTimer); trayClickTimer = null; return; } // 双击的第一次点击，先不动作
-    trayClickTimer = setTimeout(() => {
-      trayClickTimer = null;
-      tray.popUpContextMenu(menu);
-    }, 260);
-  });
-  tray.on('double-click', () => {
-    if (trayClickTimer) { clearTimeout(trayClickTimer); trayClickTimer = null; }
-    showMainWindow();
-  });
-  // 右键点击：Windows 托盘惯例，立即弹出菜单（右键无双击语义，不走延迟判定）
-  tray.on('right-click', () => {
-    if (trayClickTimer) { clearTimeout(trayClickTimer); trayClickTimer = null; } // 清掉左键挂起的延迟弹菜单
-    tray.popUpContextMenu(menu);
-  });
-  console.log('[BBPlayer] 系统托盘已就绪：左键单击弹菜单、双击打开界面，右键弹菜单；关闭主窗口将隐藏到托盘，可从托盘恢复或彻底退出');
 }
 
 const VIDEO_EXTS = require('./shared-video-exts');
@@ -89,7 +52,7 @@ if (!gotTheLock) {
 } else {
   app.on('second-instance', (event, commandLine) => {
     // 运行中再次打开视频文件：多文件逐个开独立窗口播放（复用现有新窗口机制，天然处理加载时序）；
-    // 无文件参数（如重复双击 exe）则唤起/显示主窗口（隐藏到托盘时也要重新显示）。
+    // 无文件参数（如重复双击 exe）则唤起/显示主窗口（最小化时也恢复前置）。
     // 延迟到 ready 后再建窗：开机自启期双实例竞争时 app 可能尚未就绪，直接 new BrowserWindow 会抛异常崩溃。
     app.whenReady().then(() => {
       const filePaths = parseFilePathFromArgs(commandLine);
@@ -145,7 +108,6 @@ function createPlayerWindow(options = {}) {
     minWidth: 480,
     minHeight: 320,
     frame: false, // 默认无边框
-    transparent: false,
     backgroundColor: '#08090C',
     title: 'BBPlayer',
     icon: path.join(__dirname, 'build/icon.png'),
@@ -223,20 +185,6 @@ function createPlayerWindow(options = {}) {
     }
   });
 
-  // 隐藏到托盘（主窗口点"关闭"）与重新显示：与最小化共用同一套暂停/续播策略——
-  // 渲染进程按当前模式决定：视频暂停、纯音频音乐继续后台播放
-  win.on('hide', () => {
-    if (win && win.webContents && !win.webContents.isDestroyed()) {
-      win.webContents.send('window-minimized');
-    }
-  });
-
-  win.on('show', () => {
-    if (win && win.webContents && !win.webContents.isDestroyed()) {
-      win.webContents.send('window-restored');
-    }
-  });
-
   // 用户手动拖拽窗口边缘时解除视频宽高比锁定（程序化 setSize 不触发 will-resize，
   // 因此换片自动贴合不受影响）；下次加载新视频时会重新锁定。
   // 同时标记：此 resize 来自用户手势，可写入窗口状态记忆（程序化 setSize 不可写）
@@ -272,15 +220,9 @@ function createPlayerWindow(options = {}) {
     win.on('resize', () => { if (!programmaticResizeWindows.has(win)) scheduleStateSave(); });
     win.on('move', scheduleStateSave);
 
-    // 主窗口"关闭"行为=隐藏到托盘（常驻后台，音乐/视频继续播放）；
-    // 仅当 isQuitting（托盘"关闭软件"或系统关机）时才真正关闭并落盘窗口状态
-    win.on('close', (e) => {
-      if (!isQuitting) {
-        e.preventDefault();
-        win.hide();
-        return;
-      }
-      // 真正退出：取消挂起的防抖保存并强制落盘一次（避免最后一次移动/缩放丢失）
+    // 主窗口"关闭"= 直接退出软件；退出前取消挂起的防抖保存并强制落盘一次窗口状态
+    // （避免最后一次移动/缩放因防抖还没到点而丢失）
+    win.on('close', () => {
       if (stateSaveTimer) {
         clearTimeout(stateSaveTimer);
         stateSaveTimer = null;
@@ -307,21 +249,14 @@ function isTrustedSender(event) {
   return !!(win && playerWindows.has(win));
 }
 
-// 真正退出前放行窗口关闭（托盘菜单"关闭软件"、系统关机/注销都会走到这里）
-app.on('before-quit', () => {
-  isQuitting = true;
-});
-
 // 软件准备就绪
 app.whenReady().then(() => {
   mainWindow = createPlayerWindow({ isMain: true });
-  createTray();
 });
 
 app.on('window-all-closed', () => {
-  // 仅在真正退出流程（托盘"关闭软件"/系统关机）时结束进程；
-  // 平时即使窗口全部意外关闭也保持托盘常驻，用户可从托盘"打开界面"重建主窗口
-  if (isQuitting) app.quit();
+  // 所有窗口关闭即退出软件（主窗口点"关闭"或最后一个窗口关掉都走这里）
+  app.quit();
 });
 
 // === IPC 原生窗口交互处理（作用于发起窗口自身，多窗口各自独立） ===
@@ -391,9 +326,13 @@ ipcMain.handle('path-to-url', (event, filePath) => {
   return url;
 });
 
-// 查找音频文件同目录的封面图：cover/folder 惯例命名 + 同名图片，命中返回 file:// URL，未命中返回 null。
+// 查找音频文件同目录的封面图：cover/folder 惯例命名 + 同名图片，命中返回可用的图片 URL，未命中返回 null。
 // 渲染进程（沙箱）无法直接读目录，故由主进程完成；文件名取自固定惯例与自身 basename，无路径注入风险。
+// 命中时优先返回 data: URL：data: 图像与页面同源，渲染端 canvas 采样主色（环境光功能）不被跨域污染；
+// file:// 图像在 file:// 页面必然污染画布，getImageData 必抛 SecurityError。超大封面回退 file://（显示不受影响，仅采样走兜底背景）。
 const COVER_FILENAMES = ['cover.jpg', 'cover.jpeg', 'cover.png', 'cover.webp', 'folder.jpg', 'folder.png', 'front.jpg', 'front.png'];
+const MAX_COVER_BYTES = 8 * 1024 * 1024; // 8MB：超过则不走 base64（防止特大图撑爆 IPC 载荷）
+const COVER_MIME = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' };
 ipcMain.handle('file:findCover', (event, filePath) => {
   if (!isTrustedSender(event)) return null;
   if (typeof filePath !== 'string' || !filePath) return null;
@@ -405,6 +344,17 @@ ipcMain.handle('file:findCover', (event, filePath) => {
     for (const name of candidates) {
       const p = path.join(dir, name);
       if (fs.existsSync(p) && fs.statSync(p).isFile()) {
+        const mime = COVER_MIME[path.extname(p).toLowerCase()];
+        if (mime) {
+          try {
+            const stat = fs.statSync(p);
+            if (stat.size > 0 && stat.size <= MAX_COVER_BYTES) {
+              return `data:${mime};base64,${fs.readFileSync(p).toString('base64')}`;
+            }
+          } catch (err) {
+            console.warn('封面转 data URL 失败，回退 file://:', p, err);
+          }
+        }
         return pathToFileURL(p).href;
       }
     }
@@ -461,7 +411,7 @@ ipcMain.handle('dialog:openSubtitle', async (event) => {
 
 // 打开整个文件夹，返回其中所有视频文件的绝对路径列表（支持安全深度递归）
 // 返回 { files, truncated }：truncated 表示达到 maxFiles 上限被截断，由渲染进程提示用户
-async function scanDirectorySafe(dirPath, currentDepth = 0, maxDepth = 3, maxFiles = 500) {
+async function scanDirectorySafe(dirPath, maxDepth = 3, maxFiles = 500) {
   const collected = [];
   let truncated = false;
 
@@ -497,7 +447,7 @@ async function scanDirectorySafe(dirPath, currentDepth = 0, maxDepth = 3, maxFil
     }
   }
 
-  await walk(dirPath, currentDepth);
+  await walk(dirPath, 0);
   return { files: collected, truncated };
 }
 
@@ -527,7 +477,7 @@ const ALLOWED_SUBTITLE_EXTS = new Set(['.srt', '.vtt', '.ass', '.ssa']);
 const MAX_SUBTITLE_BYTES = 10 * 1024 * 1024; // 10MB，防止误选超大文件撑爆内存
 
 // 字幕编码嗅探：BOM 识别 → UTF-8 严格解码 → GBK 回退。
-// 覆盖中文环境最常见的 ANSI(GBK) 老字幕；与 renderer.js 中拖拽路径的 decodeSubtitleBuffer 保持同步。
+// 覆盖中文环境最常见的 ANSI(GBK) 老字幕；readText 与拖入字幕（file:decodeSubtitle）两条路径共用本实现。
 function decodeSubtitleBuffer(buf) {
   if (!buf || buf.length === 0) return '';
   // UTF-8 BOM
@@ -576,6 +526,15 @@ ipcMain.handle('file:readText', async (event, filePath) => {
     }
     return null;
   }
+});
+
+// 解码拖入字幕的原始字节（渲染端 FileReader 读出 ArrayBuffer 后经此解码）。
+// 统一走主进程的 decodeSubtitleBuffer，避免同一套编码嗅探在主进程与渲染端各维护一份、改一处漏一处
+ipcMain.handle('file:decodeSubtitle', (event, payload) => {
+  if (!isTrustedSender(event)) return null;
+  if (!(payload instanceof ArrayBuffer)) return null;
+  if (payload.byteLength === 0 || payload.byteLength > MAX_SUBTITLE_BYTES) return null;
+  return decodeSubtitleBuffer(new Uint8Array(payload));
 });
 
 // 导出保存高清截图到本地文件（渲染进程固定以 ArrayBuffer 载荷传输，避免大图 base64 膨胀）

@@ -27,8 +27,9 @@ window.electronAPI.onWindowMinimized(() => {
 });
 window.electronAPI.onWindowRestored(() => {
   if (wasPlayingBeforeMinimize) {
-    if (video && isVideoLoaded && !video.paused) {
-      // 最小化期间视频若已自然播完（ended 自动暂停），不再强制续播，避免"播完又被播起"
+    // 最小化时已主动暂停，此处 video.paused 必为 true，据此续播；
+    // ended 兜底：极端情况下最小化期间已播完则不强行重播
+    if (video && isVideoLoaded && video.paused && !video.ended) {
       video.play().then(() => {
         updatePlayPauseUI(true);
       }).catch(console.error);
@@ -116,7 +117,6 @@ let currentFilePath = '';
 let hasRealPath = false; // 是否具有物理路径（决定是否记播放历史）
 let isSeeking = false;
 let titlebarIdleTimer = null; // 标题栏 3 秒闲置兜底计时器
-let titlebarHideTimer = null; // 标题栏移出感应区后的延迟隐藏计时器
 let controlsIdleTimer = null; // 底部功能栏 3 秒闲置兜底计时器
 const CONTROLS_HOTZONE_HEIGHT = 120; // 底部感应区高度（像素）：鼠标进入此范围功能栏才出现
 const TITLEBAR_HOTZONE_HEIGHT = 56; // 顶部感应区高度（像素）：标题栏 42px + 14px 余量，鼠标接近顶部即唤出
@@ -216,8 +216,7 @@ function setupSpectrumCanvas() {
   const dpr = window.devicePixelRatio || 1;
   const w = Math.min(rect.width * 0.64, 720);
   const h = 64;
-  musicSpectrumCanvas.style.width = w + 'px';
-  musicSpectrumCanvas.style.height = h + 'px';
+  // 显示尺寸交给 CSS（width: min(64%, 720px); height: 64px），JS 只负责绘制缓冲的 dpr 补偿
   musicSpectrumCanvas.width = Math.round(w * dpr);
   musicSpectrumCanvas.height = Math.round(h * dpr);
 }
@@ -493,7 +492,8 @@ function persistSettings() {
     applyAppearance(isLightTheme());
     if (customSubtitle) {
       customSubtitle.style.fontSize = `${currentSubtitleFontSize}px`;
-      customSubtitle.style.display = isSubtitleVisible ? 'block' : 'none';
+      // 只恢复字号，不动 display：显隐由 renderSubtitlesAt 统一裁决，
+      // 启动就置 block 会在无字幕内容时露出一条空的字幕样式横条（空状态没有任何时机收起它）
     }
     // 字幕开关菜单文案与恢复的状态保持一致
     if (toggleSubBtn) toggleSubBtn.textContent = isSubtitleVisible ? '隐藏字幕' : '显示字幕';
@@ -790,30 +790,6 @@ if (btnNewWindow) {
 
 // === 强力全域拖拽播放支持 (丢入软件任意区域均能识别播放) ===
 
-// 字幕编码嗅探：BOM 识别 → UTF-8 严格解码 → GBK 回退（中文 ANSI 老字幕必备）。
-// 与 main.js 中主进程 readText 路径的 decodeSubtitleBuffer 保持同步。
-function decodeSubtitleBuffer(bytes) {
-  if (!bytes || bytes.length === 0) return '';
-  if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
-    return new TextDecoder('utf-8').decode(bytes.subarray(3));
-  }
-  if (bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE) {
-    return new TextDecoder('utf-16le').decode(bytes.subarray(2));
-  }
-  if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) {
-    return new TextDecoder('utf-16be').decode(bytes.subarray(2));
-  }
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch (e) {
-    try {
-      return new TextDecoder('gbk').decode(bytes);
-    } catch (e2) {
-      return new TextDecoder('latin1').decode(bytes); // 终极兜底，至少不抛异常
-    }
-  }
-}
-
 // 随视频一起拖入的字幕登记处：{ forVideo, text }。
 // 视频 URL 转换与字幕文件解码都是异步的，先后顺序不定，
 // 因此双方完成后各自查登记表，谁后到谁触发应用（事件驱动，避免轮询与竞态）
@@ -828,20 +804,21 @@ function tryApplyPendingDropSubtitle() {
   pendingDropSubtitle = null;
 }
 
-// 拖入字幕文件：读 ArrayBuffer 后按编码嗅探解码，避免 GBK 字幕按 UTF-8 读出乱码
+// 拖入字幕文件：读 ArrayBuffer 后交主进程按编码嗅探解码（与 readText 路径共用同一实现），避免 GBK 字幕按 UTF-8 读出乱码
 function loadDraggedSubtitle(file, forVideoKey) {
   file.arrayBuffer().then((buf) => {
-    const text = decodeSubtitleBuffer(new Uint8Array(buf));
-    if (forVideoKey) {
-      // 与视频混拖：登记后由 tryApplyPendingDropSubtitle 择机应用。
-      // 无条件覆盖旧登记：旧登记未被应用说明配套视频已被切走或字幕损坏，已无保留价值
-      pendingDropSubtitle = { forVideo: forVideoKey, text };
-      tryApplyPendingDropSubtitle();
-    } else if (text) {
-      // 仅拖字幕：直接应用到当前画面
-      parseAndApplySubtitle(text);
-      showToast('已加载拖入的字幕');
-    }
+    return window.electronAPI.decodeSubtitleBuffer(buf).then((text) => {
+      if (forVideoKey) {
+        // 与视频混拖：登记后由 tryApplyPendingDropSubtitle 择机应用。
+        // 无条件覆盖旧登记：旧登记未被应用说明配套视频已被切走或字幕损坏，已无保留价值
+        pendingDropSubtitle = { forVideo: forVideoKey, text };
+        tryApplyPendingDropSubtitle();
+      } else if (text) {
+        // 仅拖字幕：直接应用到当前画面
+        parseAndApplySubtitle(text);
+        showToast('已加载拖入的字幕');
+      }
+    });
   }).catch((err) => {
     console.warn('读取拖入字幕失败:', err);
     if (!forVideoKey) showToast('读取字幕文件失败');
@@ -1066,14 +1043,14 @@ function renderHistoryView() {
     });
 
     div.addEventListener('click', () => {
-      // 加入列表（若不存在）并直接播放；自动切回列表视图以便看到高亮
-      if (playlistView !== 'list') togglePlaylistView();
+      // 加入列表（若不存在）并直接播放；自动切回列表视图以便看到高亮。
+      // 本监听器只存在于历史视图渲染的条目上（切回列表视图时容器被重写、监听器随之销毁），必然处于历史视图
+      togglePlaylistView();
       if (!playlist.some(item => item.key === filePath)) {
         playlist.push({ target: filePath, name: filePath.split(/[\\/]/).pop(), key: filePath });
       }
-      const idx = playlist.findIndex(item => item.key === filePath);
-      if (idx >= 0) playPlaylistItem(idx);
-      else renderPlaylist();
+      // 上方 either 已存在或刚 push，findIndex 必命中（key 即 filePath），无 fallback 分支
+      playPlaylistItem(playlist.findIndex(item => item.key === filePath));
     });
 
     frag.appendChild(div);
@@ -1300,7 +1277,8 @@ if (video) {
 
   video.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return; // 仅左键响应
-    if (document.fullscreenElement) return; // 全屏状态下禁止拖动窗口
+    // 全屏禁拖由主进程 window-move 兜底（win.isFullScreen）；
+    // 本进程是原生全屏（无 ElementFullscreen），document.fullscreenElement 恒为 null，勿在此误设防
 
     if (clickTimer) {
       clearTimeout(clickTimer);
@@ -1400,9 +1378,15 @@ function bindMenuToggle(btn, menu) {
 // === 字幕菜单与字幕控制绑定 ===
 bindMenuToggle(subtitleBtn, subtitleMenu);
 
+// 进度可计算的统一口径：时长必须是有限正数。0/Infinity/NaN 一律不可 seek，
+// 三处（timeupdate/hover 预览/点击拖拽 seek）共用，防止算出 NaN%/Infinity% 或把 Infinity 写进 currentTime
+function hasSeekableDuration() {
+  return isFinite(video.duration) && video.duration > 0;
+}
+
 video.addEventListener('timeupdate', () => {
   // 时长 0 / Infinity / NaN 时进度不可算，跳过（避免写入 NaN%/Infinity% 无效样式值）
-  if (isSeeking || !isFinite(video.duration) || video.duration <= 0) return;
+  if (isSeeking || !hasSeekableDuration()) return;
   const current = video.currentTime;
   const total = video.duration;
   const percent = (current / total) * 100;
@@ -1445,6 +1429,9 @@ video.addEventListener('loadedmetadata', () => {
 
 // 频谱动画跟随播放状态：播放即动、暂停即停（省电，不空转）
 video.addEventListener('play', () => {
+  // 手动重播（播完 1 秒窗口内点播放/按空格/单击画面）时作废挂起的自动切集，
+  // 防止用户刚手动重播就被定时器强切下一集；自动切集自身的 play 也走这里，属幂等清理
+  clearAutoNextTimer();
   // AudioContext 挂起兜底：自动播放策略收紧/长时间挂起后，每次播放都尝试唤醒音频上下文，否则会无声且无提示
   if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
   if (isMusicMode && !musicAnimFrame) drawSpectrumFrame();
@@ -1486,7 +1473,7 @@ video.addEventListener('error', () => {
 // 进度条 Hover 时间小预览
 if (progressContainer) {
   progressContainer.addEventListener('mousemove', (e) => {
-    if (!video.duration) return;
+    if (!hasSeekableDuration()) return;
     const rect = progressContainer.getBoundingClientRect();
     const pos = (e.clientX - rect.left) / rect.width;
     const hoverPercent = Math.max(0, Math.min(1, pos));
@@ -1507,7 +1494,7 @@ if (progressContainer) {
 
   // 点击与拖拽跳转
   const handleSeek = (e) => {
-    if (!video.duration) return;
+    if (!hasSeekableDuration()) return;
     const rect = progressContainer.getBoundingClientRect();
     const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const targetTime = pos * video.duration;
@@ -1569,8 +1556,9 @@ function setVolumeIcon(vol) {
 }
 
 function updateVolume(val) {
-  // 支持 0~2（0%~200%）：0~1 原生音量区，1~2 由增益放大器扩展
-  masterVolume = Math.max(0, Math.min(2.0, parseFloat(val) || 0));
+  // 支持 0~2（0%~200%）：0~1 原生音量区，1~2 由增益放大器扩展；
+  // 钳制统一由 applyMasterVolume 负责（它本身就是唯一的音量应用出口）
+  masterVolume = parseFloat(val) || 0;
   applyMasterVolume();
   persistSettings();
 }
@@ -1881,12 +1869,19 @@ if (subSizeDownBtn) {
   });
 }
 
+// 字幕偏移提示：按最终偏移方向描述实际状态（正=延后，负=提前，0=对齐），避免"延后 -1.5s"式矛盾文案
+function showSubtitleOffsetToast() {
+  if (subtitleOffset > 0) showToast(`字幕延后 ${subtitleOffset.toFixed(1)}s`);
+  else if (subtitleOffset < 0) showToast(`字幕提前 ${Math.abs(subtitleOffset).toFixed(1)}s`);
+  else showToast('字幕时间已对齐');
+}
+
 // 字幕时间整体微调（提前/延后）
 if (subOffsetUpBtn) {
   subOffsetUpBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     subtitleOffset = Math.max(-60, Math.min(60, subtitleOffset + 0.5));
-    showToast(`字幕延后 ${subtitleOffset.toFixed(1)}s`);
+    showSubtitleOffsetToast();
     renderSubtitlesAt(video.currentTime);
     persistSettings();
   });
@@ -1896,7 +1891,7 @@ if (subOffsetDownBtn) {
   subOffsetDownBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     subtitleOffset = Math.max(-60, Math.min(60, subtitleOffset - 0.5));
-    showToast(`字幕提前 ${Math.abs(subtitleOffset).toFixed(1)}s`);
+    showSubtitleOffsetToast();
     renderSubtitlesAt(video.currentTime);
     persistSettings();
   });
@@ -2142,8 +2137,9 @@ window.addEventListener('keydown', (e) => {
 });
 
 // === 自动隐藏控制：底部功能栏 / 顶部标题栏 ===
-// 统一契约：热区唤出 → 移开延时收起 → 播放中 3 秒闲置兜底；悬停本体或按住鼠标拖拽窗口时保持显示。
-// 差异：底部"移开即隐"（无延迟），顶部带 0.4s 延迟去抖，防止鼠标滑过顶部边缘时闪烁。
+// 统一契约：热区唤出 → 移开立即收起 → 播放中 3 秒闲置兜底；悬停本体或按住鼠标拖拽窗口时保持显示。
+// 范围差异：已加载媒体（播放或暂停）移开即隐，与底部功能栏一致；空状态（无媒体）标题栏常驻，
+// 否则空窗口会藏掉唯一的最小化/关闭按键；唤出不要求播放状态（修复暂停中唤不出的旧问题）。
 
 // --- 底部功能栏 ---
 // 判断本次鼠标事件的目标是否落在功能栏本体上（含其向上弹出的子菜单，
@@ -2168,44 +2164,34 @@ function isPointerOverTitleBar(e) {
   return !!(e && e.target && e.target.closest && e.target.closest('#titlebar'));
 }
 
-// 沉浸模式：有视频且在播放时才启用"自动隐藏"，空状态/暂停时标题栏常驻
-function isImmersiveMode() {
-  return !!(video && video.src && !video.paused);
+// 已加载媒体（播放或暂停）才启用"移开即隐"；空状态（无媒体）标题栏常驻
+function hasMediaLoaded() {
+  return !!(video && video.src);
 }
 
-// 立即收起标题栏（清掉一切相关计时器）
-function hideTitleBarNow() {
-  if (titlebarHideTimer) {
-    clearTimeout(titlebarHideTimer);
-    titlebarHideTimer = null;
-  }
+// 沉浸模式：媒体播放中才启用 3 秒闲置兜底（空状态/暂停时不兜底，移开即隐已覆盖）
+function isImmersiveMode() {
+  return hasMediaLoaded() && !video.paused;
+}
+
+// 清掉标题栏闲置兜底计时器（hideTitleBarNow/showTitleBar/悬停分支共用）
+function clearTitlebarIdleTimer() {
   if (titlebarIdleTimer) {
     clearTimeout(titlebarIdleTimer);
     titlebarIdleTimer = null;
   }
-  if (titleBar) titleBar.classList.add('hide');
 }
 
-// 移出顶部感应区：延迟 0.4 秒再藏（防误触/防闪烁），期间鼠标回来会立即取消
-function scheduleHideTitleBar() {
-  if (titlebarHideTimer) return; // 已经挂着的延迟不重复计时
-  titlebarHideTimer = setTimeout(() => {
-    titlebarHideTimer = null;
-    hideTitleBarNow();
-  }, 400);
+// 立即收起标题栏
+function hideTitleBarNow() {
+  clearTitlebarIdleTimer();
+  if (titleBar) titleBar.classList.add('hide');
 }
 
 // 唤出标题栏；播放中启动 3 秒闲置兜底
 function showTitleBar() {
   if (titleBar) titleBar.classList.remove('hide');
-  if (titlebarHideTimer) {
-    clearTimeout(titlebarHideTimer);
-    titlebarHideTimer = null;
-  }
-  if (titlebarIdleTimer) {
-    clearTimeout(titlebarIdleTimer);
-    titlebarIdleTimer = null;
-  }
+  clearTitlebarIdleTimer();
   if (isImmersiveMode()) {
     titlebarIdleTimer = setTimeout(() => {
       titlebarIdleTimer = null;
@@ -2220,12 +2206,9 @@ function showControls() {
 
   if (controlsIdleTimer) clearTimeout(controlsIdleTimer);
 
+  // 兜底收起复用 hideControlsNow（清计时器+隐藏+关菜单本就是同一件事）
   if (video && !video.paused) {
-    controlsIdleTimer = setTimeout(() => {
-      controlsIdleTimer = null;
-      if (controlBar) controlBar.classList.add('hide');
-      closeAllMenus();
-    }, 3000);
+    controlsIdleTimer = setTimeout(hideControlsNow, 3000);
   }
 }
 
@@ -2237,24 +2220,17 @@ function updateControlsOnMouseMove(e) {
   const rect = videoContainer ? videoContainer.getBoundingClientRect() : null;
 
   // --- 顶部标题栏 ---
-  // 鼠标悬停在标题栏本体上：一直保持显示，暂停一切隐藏计时（含按住鼠标拖拽窗口的场景）
+  // 鼠标悬停在标题栏本体上：一直保持显示，暂停闲置兜底计时（含按住鼠标拖拽窗口的场景）
   if (isPointerOverTitleBar(e)) {
     if (titleBar) titleBar.classList.remove('hide');
-    if (titlebarHideTimer) {
-      clearTimeout(titlebarHideTimer);
-      titlebarHideTimer = null;
-    }
-    if (titlebarIdleTimer) {
-      clearTimeout(titlebarIdleTimer);
-      titlebarIdleTimer = null;
-    }
-  } else if (isImmersiveMode() && rect) {
+    clearTitlebarIdleTimer();
+  } else if (rect) {
     const inTopHotzone = (e.clientY - rect.top) <= TITLEBAR_HOTZONE_HEIGHT;
 
     if (inTopHotzone) {
-      showTitleBar(); // 踩进顶部感应区：唤出（含 3 秒兜底）
-    } else if (!(e.buttons > 0) && titleBar && !titleBar.classList.contains('hide')) {
-      scheduleHideTitleBar(); // 已离开感应区且没按住鼠标：延迟收起
+      showTitleBar(); // 踩进顶部感应区：立即唤出（播放中另起 3 秒兜底，暂停中唤出后直到移开才收）
+    } else if (hasMediaLoaded() && !(e.buttons > 0) && titleBar && !titleBar.classList.contains('hide')) {
+      hideTitleBarNow(); // 已加载媒体：移出感应区且没按住鼠标 → 立即收起（播放/暂停一致，与底部功能栏相同）
       // 正在按住鼠标拖拽窗口时不隐藏，避免 -webkit-app-region: drag 区域中途消失导致拖拽脱手
     }
   }
@@ -2282,6 +2258,15 @@ function updateControlsOnMouseMove(e) {
 if (videoContainer) {
   videoContainer.addEventListener('mousemove', (e) => {
     updateControlsOnMouseMove(e);
+  });
+  // 鼠标直接移出窗口：mousemove 收不到，按"已加载媒体移开即隐"契约在此兜底收起；
+  // 全部 UI 都是 player-container 的子元素，mouseleave 仅在真正离窗时触发（子元素间移动不触发）；
+  // 按住鼠标（拖拽窗口）时豁免，与 mousemove 的契约一致；空状态（无媒体）不收
+  videoContainer.addEventListener('mouseleave', (e) => {
+    if (hasMediaLoaded() && !(e.buttons > 0)) {
+      hideTitleBarNow();
+      hideControlsNow();
+    }
   });
   // 点击画面唤出标题栏；播放列表等非画面交互区的点击不参与，避免列表操作时 UI 跳动
   videoContainer.addEventListener('click', (e) => {

@@ -1,5 +1,5 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal
 title BBPlayer ¿ª·¢²âÊÔÆô¶¯Æ÷
 
 REM ============================================================
