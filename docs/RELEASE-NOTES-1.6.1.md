@@ -54,4 +54,4 @@ BBPlayer v1.6.1 把品牌视觉全面换装为**彩虹渐变**：从应用图标
 
 ---
 
-**完整变更日志**：[README 更新日志](./README.md#-最新更新日志) · [MIT License](./LICENSE)
+**完整变更明细**：[docs/DEVELOPER.md 版本变更章节](./DEVELOPER.md) · [MIT License](./LICENSE)

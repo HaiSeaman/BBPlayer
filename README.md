@@ -1,276 +1,163 @@
-# BBPlayer - 极简极速本地多媒体播放器
+# BBPlayer
 
 <div align="center">
 
 ![Electron](https://img.shields.io/badge/Electron-34.x-47848F?style=for-the-badge&logo=electron&logoColor=white)
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)
-![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Cross--Platform-0078D6?style=for-the-badge&logo=windows&logoColor=white)
+![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.6.1-ff3b4e?style=for-the-badge)
 
-**纯粹、轻量、高颜值的无边框现代桌面视频播放器**
+**A pure, lightweight, high-polish borderless media player for Windows**
 
-[更新日志](#-最新更新日志) • [功能特性](#-功能特性) • [技术架构](#-技术架构) • [核心算法与方案](#-核心算法与方案) • [快速上手](#-快速上手) • [构建打包](#-构建打包)
+[English](./README.md) | [简体中文](./README_CN.md)
+
+[Features](#-features) · [Supported Formats](#-supported-formats) · [Keyboard Shortcuts](#-keyboard-shortcuts) · [Quick Start](#-quick-start) · [Build from Source](#-build-from-source) · [Architecture](#-architecture) · [License](#-license)
 
 </div>
 
 ---
 
-## 📖 项目简介
+## 📖 Overview
 
-**BBPlayer** 是一款专为桌面端打造的极简、轻量、高性能本地多媒体播放器。基于 **Electron + 原生 HTML5/CSS3/JavaScript (ES6+)** 纯手工精雕细琢，完全摒弃沉重庞大的前端第三方框架与冗余依赖。
+**BBPlayer** is a minimal, lightweight local media player built with **Electron + vanilla HTML5/CSS3/JavaScript (ES6+)** — no frontend frameworks, no runtime npm dependencies.
 
-软件采用 **"安静玻璃"低占用设计语言**：无 OS 级拖拽区、幽灵图标控制栏、彩虹品牌渐变强调，
-在极致压低 CPU / 内存 / GPU 占用的同时，保留底部功能栏一处毛玻璃质感，提供如原生系统组件般
-优雅的沉浸影音体验。
+It follows a **"Quiet Glass"** design philosophy: the player UI gets out of the way so the video itself is the hero. Ghost-icon controls, a transparent titlebar, a single rainbow-branded accent, and aggressive GPU/CPU budgeting (only one `backdrop-filter` in the entire UI) deliver an immersive, native-feeling experience.
 
----
-
-## 🆕 最新更新日志
-
-### 📌 v1.6.1 彩虹品牌主题 + 播放栏彩虹化 + 全量审查修复
-
-- **🌈 全新彩虹品牌图标**：应用图标重制为**彩虹渐变播放三角**（红→橙→黄→绿→青→蓝→紫，
-  保留深色描边与透明底），覆盖应用窗口、任务栏、打包 EXE 与全部媒体文件关联图标；
-  标题栏 Logo、启动页大 Logo 同步彩虹化。
-- **🎵 播放键彩虹化**：底部功能栏播放/暂停键改为**透明底色 + 彩虹渐变图标**
-  （播放三角 / 暂停双竖条两态均呈连续彩虹），与应用图标同款视觉语言。
-- **📊 彩虹进度条**：播放进度条改为彩虹渐变，采用恒定色带技术——色带位置固定，
-  不随播放进度压缩变形，任意进度下都是完整红→紫。
-- **🔘 窗口按键提亮**：右上角最小化/最大化/关闭的图标从灰色改为与软件名一致的纯白
-  （深色主题），悬停时浮现深色高亮块，清晰易点。
-- **🛡️ 正确性修复（双轴全量审查）**：播放列表"移除/新窗口"按钮点击在图标上会穿透成
-  "播放"的 BUG；删除失败条目后重新添加同名文件仍被跳过的"永久拉黑"BUG；
-  键盘快进键对无时长媒体的校验漏洞。
-- **🧹 工程瘦身（净约 -50 行）**：视频画面与标题栏两套重复拖拽实现合并为单一函数；
-  字幕扩展名白名单从 4 处硬编码收敛为 `shared-subtitle-exts.js` 单一来源；
-  彩虹色标 22 处硬编码收敛为 7 个 CSS 变量；清理 4 组死代码变量与常量；
-  扩展名对账脚本挂载为 `npm run verify`。
-
-### 📌 v1.6.0 "安静玻璃"低占用视觉重做 + 标题栏拖拽重构
-
-- **🎨 全新"安静玻璃"设计语言**：以简洁、无边框、CPU/内存/GPU 占用最低为第一原则——
-  移除全部多余模糊与发光（毛玻璃仅保留底部功能栏一处），界面元素全面"减负"，
-  播放器的英雄回归画面本身。
-- **🎛️ 控制栏幽灵化重排**：全部按键去边框去投影，悬停才浮现浅底；1px 细分隔线划出
-  「倍速·比例·CC | 音量 | 外观·模式·截图·旋转 | 全屏·列表」四个职能组；播放键是
-  唯一的实心品牌青强调（圆角方形，无渐变无发光）。
-- **🪟 窗口控制按键贴角**：最小化/最大化/关闭改为 44×42 矩形按键贴合窗口右上角
-  （原生无边框应用样式，不再悬浮），关闭键悬停纯红。
-- **🖱️ 标题栏拖拽重构（重要修复）**：修复"鼠标移到顶部菜单栏经常不显示"——根因是
-  OS 级拖拽区吞掉鼠标事件导致热区唤出失效；现改为事件驱动的 JS 拖拽，
-  热区唤出/悬停保持/停放不收起全部稳定，并新增双击标题栏 = 最大化/还原。
-- **📃 播放列表现代化**：面板加宽至 320px，正在播放条目显示左缘强调条 + 三根跳动
-  小均衡器（暂停即静止）；序号等宽两位数；操作按钮统一 SVG 图标；列表上下缘渐隐。
-- **♿ 细节与可访问性**：菜单左对齐 + 指示点选中态；圆角四档 token 统一；
-  键盘焦点环与"减少动态效果"系统偏好支持；清理 10 组闲置样式变量。
-- **🛡️ 正确性修复**：播放列表切换曲目时均衡器指示残留修复（轻量高亮路径与 DOM 结构
-  对齐）；全量代码审查通过。
-
-### 📌 v1.5.2 关闭即退出 + 标题栏即时显隐 + 全量审查加固
-
-- **🚪 关闭即退出**：主窗口点"关闭"直接退出软件，v1.5.0 的系统托盘常驻按需求移除；窗口大小/位置记忆在退出前强制保存，下次打开位置不丢。
-- **🖥️ 标题栏跟随鼠标即时显隐**：鼠标移入顶部感应区**立即弹出**（暂停中也能唤出，修复旧版"暂停后唤不出"BUG），移开**立即收起**（原 0.4 秒延迟取消），鼠标直接移出窗口同样即时收起；播放中 3 秒无操作自动隐藏保留。
-- **🎨 主题色对齐复核**：标题栏保持全透明原形状，文字/按键颜色全部走主题变量，深浅主题切换与底部功能栏同步变色。
-- **🛡️ 8 项正确性修复（发布前全量审查）**：**最小化后恢复续播失效**（条件写反导致功能整体无效）、**播完 1 秒内手动重播被强切下一集**、**音乐封面环境光静默失效**（跨域污染，改经主进程 data URL 下发）、空字幕横条残留、无时长媒体进度守卫口径统一、字幕偏移提示矛盾文案、鼠标离窗收起兜底、全屏死防御清理。
-- **🧹 冗余精简**：字幕编码嗅探收敛为主进程单一实现（删渲染端重复副本，拖入字幕经新 IPC 通道解码）；闲置兜底回调复用、恒真守卫与不可达分支删除、频谱画布重复尺寸设置移除、音量钳制收敛单一出口等 10 项（净 -27 行）。
-
-### 📌 v1.5.1 双主题外观 + 全新彩色播放键图标 + 核心稳定加固
-
-- **🎨 浅色 / 深色双外观主题**：循环播放按键左侧新增【外观】一键切换——浅色模式（浅底深字）与深色模式（深底亮字）即时切换，品牌青蓝霓虹渐变两套主题共享，文字/控件颜色自动反转保证清晰度；**外观选择自动记忆**，重启软件保留。
-- **🖼️ 全新品牌图标**：**彩色播放键**（青→蓝→紫渐变 + 玻璃高光、透明底色、占满图标），应用窗口、任务栏、系统托盘、文件关联与打包 EXE（任务管理器）图标全部统一更换。
-- **🪟 顶部状态栏透明化**：移除毛玻璃半透明底色，标题栏**全透明**、只保留文字与窗口按键；文字/图标自动叠加字影，在任意画面背景下清晰可读。
-- **🧬 媒体扩展名单一来源重构**：扩展名统一收敛为 `shared-video-exts.js` 事实来源，主/渲染进程经 IPC 共享同一份数据，新增 `verify-exts.js` 对账脚本自动校验一致性（改扩展名跑一下即知有无漏改）。
-- **🚀 打开方式优化**：命令行 / "打开方式"一次传入**多个媒体文件**时逐个开独立窗口播放（原只播第一个）。
-- **🛡️ 13 项正确性修复（全量代码审查）**：清空播放列表瞬间旧视频"复活"竞态、无时长媒体时间显示乱码、播放结束图标不复位、最大化退出后重启"伪最大化"占屏、自动贴合窗口尺寸覆盖用户手调偏好、开机自启期双击文件崩溃风险、窗口拖拽失焦监听器泄漏、音乐模式截图误报、冷启动文件双通道竞态等。
-- **🧹 冗余清理**：移除测试残留配置与 82 个工具会话文件；`.gitignore` 精简死规则；四个弹出菜单孪生代码合并统一。
+> **Highlights at a glance** — multi-window playback, 200% volume boost with anti-clipping, a full music mode with spectrum visualization and ambient cover glow, a self-built SRT/VTT/ASS/SSA subtitle engine with GBK encoding detection, and rainbow file-type icons across all 25 associated media formats.
 
 ---
 
-### 📌 v1.5.0 音频播放器 + 系统托盘常驻（影音合一）
+## ✨ Features
 
-- **🎵 六种主流音频格式原生支持**：`mp3 / flac / wav / ogg / m4a / aac` 直接播放（Chromium 内置解码器，真实样本实测通过，含裸 .aac），视频播放器秒变音乐播放器。
-- **🌈 音乐播放效果界面**：纯音频自动进入音乐模式——**封面图自动查找**（同目录 cover.jpg / folder.jpg / 同名图片）+ **封面主色环境光**（每首歌背景颜色随封面变化，Ambient 风格）+ 歌名与格式时长信息 + **32 柱动态频谱**随音乐律动（瞳孔式沉浸播放体验）。
-- **🧘 最小化/隐藏行为分流**：**视频**最小化自动暂停（恢复续播）；**音乐**最小化/隐藏**不暂停，后台继续播放**。
-- **📌 系统托盘常驻**：点右上角关闭变为**收进托盘**继续后台播放；托盘**左键单击**弹菜单（打开界面/关闭软件）、**左键双击**直接打开、**右键**弹菜单；再次双击程序图标可唤起隐藏窗口。
-- **🛡️ 全量代码审查修复**：约 20 项安全/正确性/性能问题修复（CSP、IPC 白名单、文件名清洗、拖拽 IPC 合帧、O(1) 去重等）。
+### 🖥️ Player Experience
+- **Borderless frameless window** with a fully transparent titlebar — text and buttons stay readable over any video frame thanks to adaptive text shadows.
+- **Smart auto-hiding UI**: titlebar and control dock slide in from hotzones and hide instantly when the mouse leaves; a 3-second idle timer kicks in during playback. Empty state keeps window buttons always available.
+- **Drag-to-move window** on both the video surface and the titlebar (single click = play/pause, double click = fullscreen; double-click the titlebar = maximize/restore).
+- **Aspect-ratio auto-fit**: the window locks to the video's resolution to eliminate black bars; manually resizing unlocks it.
+- **Rainbow brand identity**: gradient play-triangle app icon (taskbar, EXE, and all file associations), rainbow progress bar with a fixed color band, and a transparent play/pause button with a gradient glyph.
 
----
+### 🎬 Playback
+- **Multi-window playback**: open any video in its own independent player window — playlist hover button, header button, or double-clicking a file while the app is running.
+- **Playlist & watch history**: drag-and-drop or multi-select loading, natural episode ordering (`EP2` before `EP10`), resume-playback memory, three play modes (loop all / shuffle / loop one).
+- **Precision speed control**: 0.5x – 3.0x presets with pitch preservation.
+- **Rotation & aspect modes**: 90°/180°/270° rotation; auto / 16:9 / 4:3 / stretch-fill.
+- **4K-lossless screenshots**: canvas-based capture that respects rotation, saved as PNG.
+- **Smart resume**: playback position is remembered and offered via a toast on reopen.
 
-### 📌 v1.4.3 顶部标题栏智能沉浸与交互深度优化
+### 🎵 Music Mode (audio-only files)
+When an audio file is loaded, the player transforms into a music screen:
+- **32-bar spectrum visualization** driven by `AnalyserNode` (pauses to save power).
+- **Cover art auto-discovery** (`cover.jpg`, `folder.jpg`, or same-named images).
+- **Ambient glow**: the background gradient is sampled from the cover's dominant color, unique per track.
 
-- **🖱️ 顶部标题栏按需智能唤出（沉浸观影体验核心升级）**：
-  - 彻底终结"全窗口随处动鼠标都会弹标题栏"的打扰：**只有当鼠标移入顶部感应区（56px 宽容热区）时才灵动浮现，移开后延时 0.4 秒自动隐去**；
-  - **智能沉浸模式**：仅在视频**播放中**自动隐去；未加载视频（空状态）或暂停时标题栏保持常驻，随时从容拖动窗口或操作窗口控件；
-  - **拖拽安全保护**：按住标题栏拖动窗口或鼠标悬停在标题栏上时绝对不隐藏，彻底避免无边框窗口拖拽到一半因隐藏而"脱手"；
-  - 保留视频画面单击唤出与 3 秒闲置兜底隐藏，兼顾便捷拖窗与极简沉浸。
-- **⚡ 高频事件性能优化（消除强制同步重排）**：
-  - 重构 `mousemove` 监听逻辑：将每次鼠标移动触发的多次 `getBoundingClientRect()` 布局查询合并为单次，顶部与底部感应区共用 Rect，消除高频滑动下的 Forced Reflow，降低渲染进程 CPU 占用，滑动更跟手。
-- **🛡️ 细节与边界 BUG 深度修复**：
-  - **双击全屏边界加固**：严格限定仅在视频纯画面区域双击才切换全屏；在播放列表抽屉面板、续播 Toast、全局提示及空状态上双击不再误触发全屏；
-  - **空格键播停翻转修复**：修复点击播放按钮后按钮保持焦点时，按空格键会同时触发原生 click 与全局 toggle 导致连续翻转两次（看似无反应）的顽疾；
-  - **列表点击联动隔离**：在播放列表/历史抽屉内点选文件时，阻断意外唤出顶部标题栏，界面不再跳动；
-  - **代码防御与清理**：补充 DOM 判空容错，清理构建残留，重构显隐控制状态机注释。
+### 🔊 200% Volume Boost
+- A Web Audio pipeline (`MediaElementSource → GainNode → DynamicsCompressor → output`) breaks the browser's 100% volume ceiling — slider, scroll wheel, and arrow keys all support 0–200%.
+- A built-in compressor acts as an anti-clipping airbag: soft-knee limiting near −3 dB prevents distortion at high gain. The slider turns orange above 100% as a warning.
 
----
+### 💬 Subtitle Engine
+- **Self-built SRT / VTT / ASS / SSA parser** (browser `<track>` can't handle `file://` paths or ASS).
+- **Automatic same-name subtitle loading** from the video's directory; subtitles can also be dragged in together with the video.
+- **Encoding detection**: BOM sniffing → strict UTF-8 → GBK fallback — legacy ANSI Chinese subtitles display correctly.
+- **Full control**: font size (12–48px), global time offset (±60s), show/hide toggle.
 
-- **🔊 200% 音量翻倍增益（Audio Boost）**：
-  - 基于 Chromium 原生 **Web Audio API** 构建数字音频放大管线，彻底突破 HTML5 `<video>` 默认 100% 音量限制；
-  - 针对微弱录音、老旧电影、网课录屏等过小音源，**一键将音量提升至 200%（声音翻倍）**，人声清晰洪亮；
-  - 滑块调节、鼠标滚轮、方向键（`↑` / `↓`）以及音量记忆均无缝支持 0% ~ 200% 平滑调节。
-- **🛡️ 硬件级防破音安全气囊（Dynamics Compressor）**：
-  - 串联轻量级动态音频压缩器（`DynamicsCompressorNode`），在正常声压下无损穿透，在超大声音波峰逼近失真极限（-3dB）时自动柔和削峰，**防止爆音、刺耳与扬声器破音**。
-- **🎨 视觉细节打磨**：
-  - 音量滑块在拉过 100% 进入增益放大区时，自动变为**发光霓虹橙色**，清晰反馈当前处于高增益状态。
-
----
-
-### 📌 v1.4 沉浸模式与代码瘦身
-
-- **🖱️ 底部功能栏按需唤出（本版核心交互升级）**：
-  - 功能栏不再因鼠标在全窗口乱晃而频繁弹出——**只有当鼠标移入屏幕底部感应区（约 120px）时才优雅浮现，移开立即隐去**；
-  - 鼠标悬停在功能栏或其弹出菜单（倍速/比例/字幕/播放模式）上时稳定保持显示，从容点按不消失；
-  - 原有的「播放中 3 秒无操作自动隐藏」继续生效，作为沉浸观影的兜底保障；
-  - 单击视频画面回归纯粹：只负责播放/暂停，不再顺带唤出功能栏。
-- **🧹 冗余代码大扫除**：
-  - 移除遗留的一次性调试脚本；合并拖拽事件的重复监听器注册与「上一个 / 下一个」按钮的孪生代码逻辑，行为完全一致、代码更精瘦。
-- **🛡️ 隐患修复**：
-  - 修复拖拽文件进窗口时浏览器可能抢占打开文件的边缘情况（`drop` 默认行为阻断显式化）。
-- **📄 新增开发者文档 `DEVELOPER.md`**：
-  - 完整记录架构机制、控制栏显隐状态机、IPC 安全面与版本变更明细，方便社区参与维护。
+### 🎨 Appearance
+- **Light / dark themes** with one click; semantic CSS variables keep text and controls readable in both; theme choice is remembered.
+- File associations for 25 media formats, single-instance lock, window size/position memory (including maximized state).
 
 ---
 
-## ✨ 功能特性
+## 📂 Supported Formats
 
-### 1. 极致纯粹的视觉与交互
-- **🌗 浅色 / 深色双外观一键切换**：循环播放键左侧【外观】键即时切换两套主题；品牌青蓝共享，文字与控件颜色随主题自动反转保证清晰度，选择自动记忆。
-- **🪟 全透明顶部状态栏**：无底色的纯净标题栏，仅保留文字与窗口按键；贴角矩形窗口控制键（原生无边框样式），支持 JS 平滑拖拽移动与双击最大化，自动字影保证任意画面背景下可读。
-- **"安静玻璃"低占用视觉**：界面全面减负——幽灵图标按键、彩虹渐变播放键与进度条、四档统一圆角；模糊与发光收敛到最少，CPU / GPU 占用极低。
-- **无黑边自适应比例**：窗口按视频比例锁定，画面完美贴合无残留边框。
-- **毛玻璃悬浮 Dock 栏**：控制中心在鼠标移入时优雅淡入、移出自动隐匿；幽灵图标 + 职能分组，兼顾视觉美感与易用性。
-- **多功能侧边抽屉**：精致抽屉式设计，收纳播放列表与观看历史（支持单条删除与一键清空），正在播放条目带均衡器律动指示。
-- **多选文件快速载入**：打开文件对话框支持一次选择多个视频加入播放列表。
+| Type | Formats |
+|---|---|
+| **Video** | MP4 · MKV · AVI · MOV · WebM · FLV · WMV · M4V · TS · RMVB · RM · 3GP · MPG · MPEG · M2TS · VOB · OGV · F4V · M2V |
+| **Audio** | MP3 · FLAC · WAV · OGG · M4A · AAC |
 
-### 2. 强大的媒体格式与播放控制
-- **全格式影音广泛支持**：原生解码播放 MP4、MKV、WebM、MOV、AVI、FLV、TS、RMVB、3GP、M2TS、VOB、OGV 等视频格式，以及 **MP3、FLAC、WAV、OGG、M4A、AAC 六种主流音频格式**（Chromium 内置解码器，实测含裸 .aac）。
-- **🎵 音乐播放效果模式**（纯音频自动开启）：
-  - **动态频谱可视化**：32 柱渐变频谱随音乐律动，暂停即停（零额外耗电）。
-  - **封面自动查找**：同目录 `cover.jpg` / `folder.jpg` / 同名图片自动显示，找不到显示音符占位图。
-  - **封面主色环境光**：背景渐变色随封面主色变化，每首歌都有专属氛围色。
-  - **信息展示**：歌名 + "格式 · 时长"元信息行；音频播放时自动隐藏截图/字幕按钮。
-- **🚪 关闭即退出**：主窗口点"关闭"直接退出软件（v1.5.0 的托盘常驻已按需求移除）；音乐最小化**不暂停后台续播**，视频最小化自动暂停（恢复续播）。
-- **多维度画面调节**：
-  - **90° / 180° / 270° 画面自由旋转**，手机录制视频轻松矫正。
-  - **画面多比例切换**：支持「自适应铺满 (Fit)」、「原始比例 (Original)」、「强制 16:9」、「强制 4:3」、「填充拉伸 (Stretch)」。
-- **精准倍速调控**：预置 0.5x、0.75x、1.0x、1.25x、1.5x、2.0x、3.0x 极速切换，支持高帧率声调智能补偿（Preserves Pitch）。
-- **智能记忆续播**：毫秒级本地存储记录播放断点，下次打开自动弹出续播 Toast。
-- **多播放模式支持**：
-  - 🔁 **循环播放**（全部视频循环播放，默认）：播放完当前视频自动按序切换下一集。
-  - 🔀 **随机播放**（全部视频随机播放）：自动随机抽取下一曲目（排除当前曲目）。
-  - 🔂 **单个循环**（单个视频循环播放）：适合单曲 MV、背景视频及特定片段单循环。
-
-### 3. 专业字幕渲染引擎
-- **多格式外挂字幕解析**：深度支持 **SRT、VTT、ASS、SSA** 等字幕格式。
-- **全自动同名字幕关联**：拖入或打开视频时，自动检索同目录下同名外挂字幕文件。
-- **字幕自由定制**：支持字幕字体大小（12px~48px 按键微调）、时间轴整体偏移（±60s 提前/延后）、背景遮罩与阴影发光，以及显示/隐藏全局切换。
-
-### 4. 生产力与便捷工具
-- **4K 原画无损截图**：基于底层 Canvas 矩阵变换与原生视频帧渲染，自动纠正旋转角度，一键导出 PNG 格式无损高清截图。
-- **智能手势与滚轮调控**：在播放器视口内直接滑动鼠标滚轮即可平滑调节音量，展现发光 HUD。
-- **快捷键系统**：
-  - `Space`：播放 / 暂停
-  - `←` / `→`：快退 5 秒 / 快进 5 秒
-  - `↑` / `↓`：音量增减 5%
-  - `F11` / `双击视口`：全屏 / 退出全屏
-  - `M`：全局静音 / 恢复
-  - `S`：瞬时无损截图
+All decoding is handled natively by Chromium — zero third-party codecs or dependencies. File associations are generated by the installer; double-clicking any associated file opens it directly in BBPlayer.
 
 ---
 
-## 🛠️ 技术架构
+## ⌨️ Keyboard Shortcuts
 
-```
-BBPlayer/
-├── main.js                 # Electron 主进程 (窗口管理、IPC 路由、原生 AspectRatio 锁定)
-├── preload.js              # 上下文隔离桥接 (ContextIsolation, 暴露安全受限的 window.electronAPI)
-├── shared-video-exts.js    # 视频/音频扩展名单一事实来源 (结构化 video/audio/all)
-├── shared-subtitle-exts.js # 字幕扩展名单一事实来源 (srt/vtt/ass/ssa，主/渲染进程共享)
-├── verify-exts.js          # 扩展名一致性对账脚本 (npm run verify)
-├── index.html              # 视图模板 (极简语义化结构、CSP 安全策略、双主题 CSS 变量 + 彩虹品牌体系 + 音乐效果层)
-├── renderer.js             # 渲染进程核心控制器 (手势拖拽、字幕引擎、播放状态机、频谱可视化、外观切换)
-├── build/                  # 应用图标与静态构建资源（彩虹渐变播放三角：窗口/安装包/文件关联统一使用）
-└── package.json            # 项目元数据与 electron-builder 打包配置
-```
+| Key | Action |
+|---|---|
+| `Space` | Play / Pause |
+| `←` / `→` | Seek −5s / +5s |
+| `↑` / `↓` | Volume ±5% |
+| `F11` / double-click viewport | Toggle fullscreen (`Esc` exits) |
+| `M` | Mute / restore |
+| `S` | Screenshot |
 
 ---
 
-## 🔬 核心算法与方案
+## 🚀 Quick Start
 
-### 1. 手势指针判别算法 (Pointer Drag-Click Classifier)
-在视频画面上兼顾左键拖拽窗口与左键点击播放/暂停，Avoid 了 Electron 原生 `-webkit-app-region: drag` 对 DOM 点击事件的阻断：
-```javascript
-// 基于移动距离与阈值 (4px) 判别拖动与点击
-const deltaX = Math.abs(currentX - startX);
-const deltaY = Math.abs(currentY - startY);
-if (deltaX > 4 || deltaY > 4) {
-  isDraggingWindow = true;
-  window.electronAPI.moveWindow({ x: newWindowX, y: newWindowY });
-}
-```
+### Download (end users)
+Grab the latest release from the [Releases](../../releases) page:
+- **`BBPlayer Setup x.x.x.exe`** — standard Windows installer.
+- **`BBPlayer x.x.x.exe`** — single-file portable build, no installation required.
 
-### 2. 窗口比例锁定算法 (Window Aspect Ratio Locking)
-播放视频时，通过获取 `videoWidth` 与 `videoHeight` 动态计算比例，并向主进程发送句柄：
-```javascript
-const aspectRatio = width / height;
-mainWindow.setAspectRatio(aspectRatio);
-```
-
----
-
-## 💎 核心优势
-
-| 维度 | BBPlayer | 传统播放器 (如 PotPlayer/VLC) | 普通 Web 封装播放器 |
-|---|---|---|---|
-| **视觉颜值** | 现代极简、"安静玻璃"低占用设计、贴角窗口键、彩虹品牌强调 | 传统 Windows 面板，UI 繁琐陈旧 | 扁平粗糙，缺乏深度视觉 |
-| **内存占用** | 纯原生 JS 驱动，无大型框架损耗 (~60MB 常驻) | 依赖大量传统动态库 | 携带大型框架 runtime，开销大 |
-| **开箱即用** | 提供单文件绿色免安装版 (Portable)，即点即播 | 安装步骤冗长，需手动关联插件 | 依赖外部网络与复杂配置 |
-| **交互质感** | 画面按拽移动窗口、视频最小化自动暂停/音频后台续播、自动消除黑边 | 选项菜单层级过深，配置繁琐 | 交互响应存在微小卡顿 |
-
----
-
-## 🚀 快速上手
-
-### 本地运行
-
+### Run from source (developers)
 ```bash
-# 1. 克隆代码仓库
 git clone https://github.com/your-username/bb-player.git
 cd bb-player
-
-# 2. 安装项目依赖
 npm install
-
-# 3. 启动开发环境
 npm start
 ```
 
+> 💡 Tip: you can also drag media files onto `run-test.bat` to launch the dev build and play them immediately.
+
 ---
 
-## 📦 构建打包
-
-本项目已集成 `electron-builder`，支持一键打包：
+## 🛠️ Build from Source
 
 ```bash
-# 构建 Windows x64 平台安装包与便携单文件 EXE
-npm run build
+npm install        # install dev dependencies (electron + electron-builder only)
+npm run verify     # consistency check: shared extension lists ↔ package.json file associations
+npm run build      # produce installer + portable exe into release-dist/
 ```
 
-打包产物位于 `release-dist/` 目录下：
-- **`BBPlayer <版本号>.exe`**：单文件绿色免安装便携版（即开即用）。
-- **`BBPlayer Setup <版本号>.exe`**：标准 Windows 安装程序。
+Build outputs (in `release-dist/`):
+- `BBPlayer Setup <version>.exe` — NSIS installer
+- `BBPlayer <version>.exe` — portable executable
 
 ---
 
-## 📄 开源许可证
+## 🏗️ Architecture
 
-本项目基于 [MIT License](./LICENSE) 开放源代码。
+```
+BBPlayer/
+├── main.js                 # Main process: multi-window factory, IPC trust surface, dialogs, directory scanning
+├── preload.js              # Context-isolated bridge (contextBridge → window.electronAPI)
+├── renderer.js             # All UI logic: playback state machine, subtitles, gestures, spectrum, themes
+├── index.html              # Single-file view: DOM + all CSS (semantic variables, dual themes, rainbow tokens)
+├── shared-video-exts.js    # Single source of truth: video/audio extension lists
+├── shared-subtitle-exts.js # Single source of truth: subtitle extension list
+├── verify-exts.js          # Consistency checker: shared lists ↔ package.json file associations
+├── build/                  # App icons (rainbow gradient play triangle, ico/png)
+└── package.json            # Metadata + electron-builder config
+```
+
+**Design principles**
+- **Zero runtime dependencies** — only `electron` and `electron-builder` as devDependencies.
+- **Single-file renderer** — one `renderer.js` (~2,300 lines) per window, fully isolated state.
+- **Hardened IPC** — every handler validates the sender against a trusted-window set (`isTrustedSender`); navigation, `window.open`, and non-top-level frames are blocked.
+- **Extension single source** — media/subtitle extension lists live in shared modules consumed by both processes via IPC, auto-checked by `npm run verify`.
+
+Deep-dive documentation (state machines, audio pipeline, token-based race protection, version history) lives in **[docs/DEVELOPER.md](./docs/DEVELOPER.md)**.
+
+---
+
+## 🤝 Contributing
+
+Issues and pull requests are welcome. Before submitting:
+1. Run `npm run verify` and ensure it passes.
+2. Run the app via `run-test.bat` (or `npm start`) and smoke-test your change.
+3. Keep the zero-runtime-dependency discipline.
+
+---
+
+## 📄 License
+
+Released under the [MIT License](./LICENSE).
