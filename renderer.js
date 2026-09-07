@@ -934,21 +934,33 @@ function renderPlaylist() {
     div.className = `playlist-item ${index === currentPlaylistIndex ? 'active' : ''}`;
     div.dataset.index = String(index);
 
+    // 序号列：等宽两位序号 + 三根跳动小均衡器双份预置，由 active 状态经 CSS 切换显示
+    //（playPlaylistItem 的轻量高亮路径只改 class 不重建 DOM，两份 DOM 都必须在场）
+    const idx = document.createElement('span');
+    idx.className = 'item-index';
+    idx.textContent = String(index + 1).padStart(2, '0');
+    div.appendChild(idx);
+
+    const eq = document.createElement('span');
+    eq.className = 'eq-indicator';
+    eq.innerHTML = '<i></i><i></i><i></i>';
+    div.appendChild(eq);
+
     const nameSpan = document.createElement('span');
     nameSpan.className = 'item-name';
-    nameSpan.textContent = `${index + 1}. ${item.name}`;
+    nameSpan.textContent = item.name;
     nameSpan.title = item.name;
 
     // 在新窗口播放该视频（多视频同时播放）
     const newWinBtn = document.createElement('span');
     newWinBtn.className = 'new-win-btn';
-    newWinBtn.textContent = '↗';
     newWinBtn.title = '在新窗口播放';
+    newWinBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
 
     const removeBtn = document.createElement('span');
     removeBtn.className = 'remove-btn';
-    removeBtn.textContent = '✕';
     removeBtn.title = '从列表移除';
+    removeBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5 5 19"/></svg>';
 
     div.appendChild(nameSpan);
     div.appendChild(newWinBtn);
@@ -1029,8 +1041,8 @@ function renderHistoryView() {
 
     const removeBtn = document.createElement('span');
     removeBtn.className = 'remove-btn';
-    removeBtn.textContent = '✕';
     removeBtn.title = '删除该条历史';
+    removeBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M5 5l14 14M19 5 5 19"/></svg>';
 
     div.appendChild(nameSpan);
     div.appendChild(timeSpan);
@@ -1236,6 +1248,8 @@ if (playlistBtn && playlistPanel) {
 }
 
 function updatePlayPauseUI(isPlaying) {
+  // 播放列表"正在播放"均衡器指示随播放状态起停
+  if (playlistItemsContainer) playlistItemsContainer.classList.toggle('is-paused', !isPlaying);
   if (playPauseBtn) {
     const playIcon = playPauseBtn.querySelector('#icon-play-state');
     if (playIcon) {
@@ -2185,6 +2199,10 @@ function clearTitlebarIdleTimer() {
 // 立即收起标题栏
 function hideTitleBarNow() {
   clearTitlebarIdleTimer();
+  // 悬停守卫：标题栏是 app-region:drag 区，OS 会吞掉其上的 mousemove，
+  // 鼠标停放在标题栏上时 JS 收不到事件，3 秒兜底计时会误触发隐藏；
+  // :hover 是样式级命中检测，不受 drag 吞事件影响，用它确认真实悬停才允许收起
+  if (titleBar && titleBar.matches(':hover')) return;
   if (titleBar) titleBar.classList.add('hide');
 }
 
@@ -2272,6 +2290,65 @@ if (videoContainer) {
   videoContainer.addEventListener('click', (e) => {
     if (e.target.closest('#playlist-panel')) return;
     showTitleBar();
+  });
+}
+
+// === 标题栏鼠标拖拽移动窗口（替代 app-region:drag）===
+// OS 级拖拽区会吞掉鼠标事件（Windows 下视为 HTCAPTION），导致顶部热区唤出、
+// 悬停保持显示、停放不收起全部失效；改为与视频画面同一套 pointer + rAF 拖拽后，
+// 标题栏上的 mousemove/click/dblclick 全程可达，显隐契约行为确定化。
+if (titleBar) {
+  let tbDragging = false;
+  let tbStartX = 0;
+  let tbStartY = 0;
+  let tbWinX = 0;
+  let tbWinY = 0;
+
+  titleBar.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return; // 仅左键
+    if (e.target.closest('.window-controls')) return; // 窗口按键区不拖（按键自带 click 行为）
+    tbDragging = false;
+    tbStartX = e.screenX;
+    tbStartY = e.screenY;
+    tbWinX = window.screenX;
+    tbWinY = window.screenY;
+
+    let rafPending = false;
+    let dragTarget = { x: 0, y: 0 };
+    const onMove = (me) => {
+      const dx = me.screenX - tbStartX;
+      const dy = me.screenY - tbStartY;
+      if (!tbDragging && (Math.abs(dx) > 4 || Math.abs(dy) > 4)) tbDragging = true; // 4px 阈值区分拖拽与点击
+      if (tbDragging) {
+        dragTarget = { x: tbWinX + dx, y: tbWinY + dy };
+        if (!rafPending) {
+          rafPending = true;
+          requestAnimationFrame(() => {
+            rafPending = false;
+            window.electronAPI.moveWindow(dragTarget);
+          });
+        }
+      }
+    };
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      window.removeEventListener('blur', onCancel);
+    };
+    const onUp = () => cleanup();
+    const onCancel = () => { tbDragging = false; cleanup(); };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    window.addEventListener('blur', onCancel); // 拖拽中失焦（Alt-Tab）兜底清理，防监听器累积
+  });
+
+  // 双击标题栏空白区 = 最大化/还原（对齐原生标题栏使用习惯）
+  titleBar.addEventListener('dblclick', (e) => {
+    if (e.target.closest('.window-controls')) return;
+    window.electronAPI.maximizeWindow();
   });
 }
 

@@ -11,8 +11,8 @@
 BBPlayer/
 ├── main.js               # Electron 主进程：多窗口工厂/状态记忆、IPC 信任面、文件对话框、目录扫描
 ├── preload.js            # 预加载脚本：contextBridge 暴露 electronAPI（渲染进程唯一系统入口）
-├── renderer.js           # 渲染层全部业务逻辑（约 2200 行，单文件策略，每窗口一份独立实例）
-├── index.html            # 界面结构 + 全部内联 CSS（毛玻璃视觉 + 音乐播放效果层，单文件免额外请求）
+├── renderer.js           # 渲染层全部业务逻辑（约 2300 行，单文件策略，每窗口一份独立实例）
+├── index.html            # 界面结构 + 全部内联 CSS（"安静玻璃"低占用视觉 + 音乐播放效果层，单文件免额外请求）
 ├── shared-video-exts.js  # 媒体扩展名单一事实来源：结构化 { video, audio, all }
 ├── verify-exts.js        # 扩展名一致性对账脚本（shared-video-exts ↔ package.json fileAssociations）
 ├── run-test.bat          # 源码方式启动测试（自动检测 Node/Electron 环境）
@@ -49,13 +49,25 @@ preload（沙箱无法 require 本地模块）与渲染进程经 IPC `app:getVid
 - `hasMediaLoaded()` — 是否已加载媒体（播放或暂停）；移开即隐以此为条件，空状态（无媒体）标题栏常驻，
   保证空窗口始终有最小化/关闭按键可用；
 - `clearTitlebarIdleTimer()` — 清闲置兜底计时器（`hideTitleBarNow`/`showTitleBar`/悬停分支共用）；
-- 拖拽安全防护：`e.buttons !== 0` 且在标题栏上时不隐藏，确保无边框拖拽（`-webkit-app-region: drag`）不脱手。
+- **`hideTitleBarNow()` 悬停守卫（v1.6.0）**：收起前用 `titleBar.matches(':hover')` 确认真实非悬停，
+  防止 3 秒兜底计时在用户停放标题栏上时误触发隐藏；
+- 拖拽安全防护：`e.buttons !== 0`（按住鼠标）时不隐藏，确保拖拽窗口不脱手。
 
-### 2. 视频画面拖拽窗口 + 单击播放手势
+> **v1.6.0 重要变更**：标题栏不再使用 `-webkit-app-region: drag`。OS 级拖拽区在 Windows 下被
+> 视为 HTCAPTION，会**吞掉该区域全部鼠标事件**——隐藏后鼠标移进顶部热区收不到 mousemove
+> （唤不出），停放标题栏上 3 秒兜底计时无人清零（当面收起）。改为 JS pointer 拖拽（见下节）
+> 后事件全程可达，显隐契约行为确定化。
 
-`video` 元素 `pointerdown` 起手记录屏幕坐标，`pointermove` 位移 >4px 判定为拖窗口
-（经 IPC `window-move` 让主进程移动），否则在 `pointerup` 后延时 250ms 触发播放/暂停
-（延时用于给双击全屏让路，双击会取消该计时器）。
+### 2. 窗口拖拽（视频画面 + 标题栏）与单击播放手势
+
+同一套 pointer 手势模式用于两个区域（v1.6.0 起标题栏与视频画面统一）：
+
+- **`video` 元素**：`pointerdown` 起手记录屏幕坐标，`pointermove` 位移 >4px 判定为拖窗口
+  （经 IPC `window-move` 让主进程移动），否则在 `pointerup` 后延时 250ms 触发播放/暂停
+  （延时用于给双击全屏让路，双击会取消该计时器）；
+- **`#titlebar`（v1.6.0 新增）**：与视频同一套 pointer + rAF 合帧拖拽（排除 `.window-controls`
+  按键区），替代被移除的 `app-region: drag`；新增**双击标题栏空白区 = 最大化/还原**（对齐原生
+  标题栏习惯，双击处理已排除窗口按键区）。所有监听器带 `blur` 兜底清理，防拖拽中失焦泄漏。
 
 ### 3. 拖放文件
 
@@ -218,10 +230,13 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 **核心设计**：
 
 1. **变量体系**：`:root` 定义深色默认变量集；`:root[data-theme='light']` 整体覆盖为浅色系
-   （背景 `--bg-obsidian` / 面板 `--panel-glass` / 文字 `--text-*` / 控件 `--ctrl-*` / 菜单 /
+   （背景 `--bg-obsidian` / 抬升面 `--surface-raised` / 功能栏毛玻璃 `--dock-glass` /
+   文字 `--text-*` / 幽灵按钮悬停 `--ctrl-hover-bg` / 实心强调 `--accent-solid` / 菜单 /
    进度条 / 字幕 / 音乐背景等 30+ 语义变量）。所有颜色必须走变量，禁止硬编码。
-2. **强调文字色**：`--accent-text` 独立于霓虹 `--accent-neon`——深色亮青 `#00f2fe`、浅色深青蓝
-   `#0284c7`（纯青色在浅底上对比度不足，5 处强调文字统一用此变量）。
+2. **强调色三级**：`--accent-neon`（进度条等线性元素渐变端点）、`--accent-text`（强调文字，
+   深色亮青 `#00f2fe` / 浅色深青蓝 `#0284c7`，纯青在浅底对比度不足）、
+   `--accent-solid`（v1.6.0 新增，播放键唯一实心填充：深色 `#00f2fe` 配深字、
+   浅色 `#0284c7` 配白字）。
 3. **切换**：`renderer.js` 的 `applyAppearance(isLight)` 设置 `document.documentElement.dataset.theme`；
    外观按钮 `#btn-appearance`（循环播放键左侧）图标太阳（深色）/ 月亮（浅色）提示目标状态。
 4. **持久化**：`bb_player_settings.appearance`（'light' / 'dark'），启动恢复。
@@ -235,15 +250,15 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 
 ---
 
-### 15. 标题栏透明化与品牌图标（v1.5.1；其后复核颜色主题对齐）
+### 15. 标题栏透明化与品牌图标（v1.5.1；v1.6.0 重构拖拽方式）
 
-**标题栏**：`#titlebar` 保持 v1.5.1 的全透明通栏形态（无毛玻璃底色，仅文字与按键，清晰度由
-`--titlebar-shadow`（text-shadow，深黑/浅白两套）与 `--titlebar-icon-shadow`（`drop-shadow`，
-作用于 `.title-logo svg` 与 `.win-btn`）兜底；`-webkit-app-region: drag` 拖拽区与透明背景无关）。
-**颜色主题契约**：顶栏文字/按键/悬停/投影全部取自主题变量（`--text-*`/`--win-*`/`--titlebar-*`），
-与底部功能栏共用同一套 `:root` 深浅色板——切换主题时顶部同步变色；不允许在顶栏写死主题相关颜色
-（仅品牌 Logo 渐变与关闭键悬停红为固定品牌色）。曾试验的"玻璃浮岛"方案经用户反馈否决已回退，
-恢复原形状，仅保留颜色跟随主题这一诉求。
+**标题栏**：`#titlebar` 保持全透明通栏 42px 形态（无底色，仅文字与按键）。v1.6.0 起
+文字可读性仅依赖 `--titlebar-shadow`（text-shadow，深黑/浅白两套）；图标 `drop-shadow`
+投影已随视觉减法移除（`--titlebar-icon-shadow` 变量删除）。`-webkit-app-region: drag`
+已整体移除（吞事件问题见第 1 节），窗口拖拽改由 JS pointer 手势实现（见第 2 节）。
+**颜色主题契约**：顶栏文字/按键/悬停全部取自主题变量（`--text-*`/`--win-*`），
+与底部功能栏共用同一套 `:root` 深浅色板——切换主题时顶部同步变色；不允许在顶栏写死
+主题相关颜色（仅品牌 Logo 渐变与关闭键悬停红 `#e81123` 为固定色）。
 
 **品牌图标**：`build/icon.png`（512px 高清）与 `build/icon.ico`（16/24/32/48/64/128/256
 八尺寸 PNG 条目）为"彩色播放键"：青→蓝→紫三段渐变 + 左缘玻璃高光带 + 半透明深蓝描边 +
@@ -254,7 +269,101 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 
 ---
 
+### 16. "安静玻璃"低占用视觉体系（v1.6.0 重做）
+
+**设计语言**：简洁 + 无边框 + CPU/内存/GPU 占用越低越好。播放器的英雄是画面本身，UI 随时消失；
+品牌青从"装饰"降级为"信号"——只出现在进度填充、播放键、正在播放条目三处。
+
+1. **去模糊**：v1.5.2 的 7 处 `backdrop-filter` 全部移除，面板统一用近实底
+   `--surface-raised`（深 0.96 / 浅 0.97）——blur 是界面最大的 GPU 开销项。
+   **唯一保留**：底部功能栏 `--dock-glass`（深浅各 0.72 透明度 + blur(20px) saturate(160%)），
+   为用户指定的视觉效果。
+2. **去发光**：进度把手 / 按钮 hover / 主按钮 / 续播条 / 音量增益 / 标题栏图标的
+   glow 与 drop-shadow 全部移除；强调语义由颜色承担而非光晕。
+3. **圆角 token 化**：`--r-sm(8) / --r-md(12) / --r-lg(16) / --r-full(999)` 四档全局统一。
+4. **幽灵按钮**：`.ctrl-btn` 无边框无投影，默认 `--text-secondary` 图标色，悬停浮现
+   `--ctrl-hover-bg` 浅底，激活态只染 `--accent-text`；文字按钮（倍速/比例/CC）同体系。
+5. **职能分组**：右栏以 `.ctrl-divider`（1px hairline）分为
+   [倍速·比例·CC] | [音量] | [外观·模式·截图·旋转] | [全屏·列表] 四组；所有功能保持可见
+   （用户否决了溢出菜单方案）。
+6. **播放键唯一实心**：`#btn-play` 40px 圆角方形（`--r-md`），纯色 `--accent-solid`
+   填充 + `--accent-on-solid` 反色图标，无渐变无发光；hover 仅 scale(1.05)。
+7. **窗口控制按键贴角**：44×42 矩形热区经负 margin 延伸到窗口右上角（VS Code/Chrome
+   式原生无边框样式），无圆角无边框；关闭键 hover 纯红 `#e81123`。
+8. **菜单**：左对齐 + `::before` 指示点标记选中项（所有条目占位保证文字对齐），
+   移除底色块高亮。
+9. **播放列表**（详见第 17 节）：正在播放 = 左缘 3px 强调条 + 三根跳动小均衡器；
+   操作按钮（↗ 新窗口 / ✕ 移除）从文字字符改为 14px SVG，与全局图标体系一致；
+   上下缘 22px 渐隐 mask；面板 300→320px；计数改胶囊徽标（`--accent-tint`）。
+10. **可访问性**：`button:focus-visible` 焦点环（仅键盘导航显示）；
+    `prefers-reduced-motion` 全局动效关停；`transition: all` 六处全部收窄为具体属性。
+11. **变量清理**：删除闲置的 `--panel-glass` / `--ctrl-bg` / `--ctrl-border` /
+    `--ctrl-hover-border` / `--ctrl-text` / `--ctrl-hover` / `--menu-bg` / `--tooltip-bg` /
+    `--accent-glow` / `--titlebar-icon-shadow` 共 10 组。
+
+### 17. 播放列表"正在播放"指示与轻量高亮路径（v1.6.0）
+
+**结构**：每条 `.playlist-item` 固定预置 `.item-index`（等宽两位序号）与
+`.eq-indicator`（三根 `i` 柱，`transform: scaleY` 关键帧动画）双份 DOM，
+由 `.active` 类经 CSS 切换可见性。
+
+**为什么双份**：`playPlaylistItem()` 存在一条轻量高亮路径——列表 DOM 与数据同步时只
+切换新旧条目的 `.active` class、不重建 DOM（避免整列表重排）。若均衡器/序号是二选一
+生成的单份 DOM，轻量路径会导致旧条目均衡器残留、新条目只有序号。双份预置 + CSS 切换
+让快慢两条渲染路径行为一致。
+
+**暂停联动**：`updatePlayPauseUI(isPlaying)` 同步切换 `.playlist-items.is-paused`，
+CSS `animation-play-state: paused` 让均衡器随播放状态起停（暂停时不空转耗电）。
+
+---
+
 ## 三、版本变更明细
+
+### v1.6.0——"安静玻璃"低占用视觉重做 + 标题栏拖拽重构 + 正确性修复
+
+#### A. 视觉体系重做（设计语言：简洁 / 无边框 / 低资源占用，用户需求）
+
+1. **去模糊降 GPU**：7 处 `backdrop-filter` → 近实底 `--surface-raised`；
+   唯一保留底部功能栏毛玻璃（`--dock-glass` + blur(20px)，用户指定）；
+2. **去发光**：进度把手/按钮 hover/主按钮/续播条/音量增益/标题栏图标的 glow 与
+   drop-shadow 全移除；圆角 token 化（--r-sm/md/lg/full 四档）；
+3. **控制栏幽灵化**：`.ctrl-btn` 无边框无投影 hover 浅底；新增 `.ctrl-divider` 分组
+   （倍速·比例·CC | 音量 | 外观·模式·截图·旋转 | 全屏·列表），所有功能保持可见；
+4. **播放键唯一实心**：40px 圆角方形纯色强调（`--accent-solid`），无渐变无发光；
+5. **窗口控制按键贴角**：44×42 矩形热区延伸到窗口右上角（原生无边框样式），
+   关闭键 hover 纯红 `#e81123`；
+6. **菜单左对齐** + `::before` 指示点选中态；播放列表 320px、渐隐 mask、SVG 操作图标、
+   计数胶囊徽标；空状态文案精简；
+7. **可访问性**：`:focus-visible` 焦点环 + `prefers-reduced-motion`；
+   `transition: all` 全部收窄；清理 10 组闲置 CSS 变量。
+
+#### B. 标题栏拖拽重构与显隐修复（重要 BUG，用户报告）
+
+**根因**：`-webkit-app-region: drag` 的 OS 级拖拽区在 Windows 下视为 HTCAPTION，
+**吞掉该区域全部鼠标事件**——隐藏后鼠标移进顶部热区收不到 mousemove（唤不出）；
+停放标题栏上 3 秒兜底计时无人清零（当面收起）。
+
+1. 标题栏移除 `app-region: drag`，改用与视频画面同一套 pointer + rAF 的 JS 拖拽
+   （4px 阈值判拖/点，`window-move` IPC，blur 兜底清理）；
+2. 新增双击标题栏空白区 = 最大化/还原（对齐原生标题栏习惯）；
+3. `hideTitleBarNow()` 增加 `:hover` 守卫，兜底计时绝不在真实悬停时收起。
+
+#### C. 正确性修复（全量审查）
+
+1. **播放列表均衡器残留**：`playPlaylistItem` 轻量高亮路径只切 class 不重建 DOM，
+   与"均衡器/序号二选一"的单份 DOM 生成冲突 → 每条目预置双份 DOM
+   （`.item-index` + `.eq-indicator`），CSS 按 active 切换（详见关键机制第 17 节）；
+2. **均衡器暂停联动**：`updatePlayPauseUI` 同步 `.playlist-items.is-paused`，
+   暂停时动画静止不空转；
+3. 播放列表操作按钮（↗/✕）从文字字符统一为 SVG 图标。
+
+#### D. 性能与清理
+
+- GPU：blur 面积大幅削减 + 全部 glow/drop-shadow 移除；
+- CPU：`transition: all` → 具体属性，消除意外属性动画；
+- 删除 10 组闲置 CSS 变量与全部发光层叠。
+
+---
 
 ### v1.5.2——关闭即退出 + 标题栏跟随鼠标即时显隐 + 全量审查修复与瘦身
 

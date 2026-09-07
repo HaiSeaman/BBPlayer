@@ -7,21 +7,33 @@
   <style>
     :root {
       --bg-obsidian: #08090c;
-      --panel-glass: rgba(14, 17, 23, 0.75);
       --panel-border: rgba(255, 255, 255, 0.08);
       --panel-border-glow: rgba(0, 242, 254, 0.25);
       --accent-neon: #00f2fe;
       /* 强调文字色：深色主题用亮青，浅色主题用深青蓝，保证对比度（青色纯色在浅底上不可读） */
       --accent-text: #00f2fe;
       --accent-gradient: linear-gradient(135deg, #00f2fe 0%, #4facfe 100%);
-      --accent-glow: rgba(0, 242, 254, 0.4);
+      /* 播放键唯一实心强调（点元素纯色，渐变只留给进度条） */
+      --accent-solid: #00f2fe;
+      --accent-on-solid: #051019;
+      --accent-tint: rgba(0, 242, 254, 0.1);
+      /* 统一圆角刻度（四档） */
+      --r-sm: 8px;
+      --r-md: 12px;
+      --r-lg: 16px;
+      --r-full: 999px;
+      /* 实心抬升面：替代毛玻璃 backdrop-filter（省 GPU 模糊开销），近实底保证可读性 */
+      --surface-raised: rgba(17, 20, 27, 0.96);
+      /* 幽灵按钮悬停底色 */
+      --ctrl-hover-bg: rgba(255, 255, 255, 0.08);
+      /* 功能栏毛玻璃半透明底色（用户指定保留的视觉效果，仅此一处 backdrop-filter） */
+      --dock-glass: rgba(14, 17, 23, 0.72);
       --cover-ring: rgba(255, 255, 255, 0.07);
       --text-primary: #f8fafc;
       --text-secondary: #94a3b8;
       --text-muted: #64748b;
       /* —— 外观主题高级变量（深色为默认值，data-theme="light" 时整体覆盖为浅色系） —— */
       --titlebar-shadow: 0 1px 6px rgba(0, 0, 0, 0.8), 0 1px 2px rgba(0, 0, 0, 0.6);
-      --titlebar-icon-shadow: rgba(0, 0, 0, 0.7);
       --ghost-bg: rgba(255, 255, 255, 0.06);
       --ghost-hover: rgba(255, 255, 255, 0.12);
       --ghost-hover-border: rgba(255, 255, 255, 0.2);
@@ -32,16 +44,9 @@
       --music-title-shadow: 0 2px 16px rgba(0, 0, 0, 0.72);
       --bar-border: rgba(255, 255, 255, 0.2);
       --shadow-bar: 0 20px 50px rgba(0, 0, 0, 0.65);
-      --ctrl-bg: rgba(255, 255, 255, 0.12);
-      --ctrl-border: rgba(255, 255, 255, 0.2);
-      --ctrl-hover-border: rgba(255, 255, 255, 0.35);
-      --ctrl-text: #ffffff;
-      --ctrl-hover: rgba(0, 242, 254, 0.3);
       --track-bg: rgba(255, 255, 255, 0.12);
       --handle-bg: #ffffff;
-      --menu-bg: rgba(14, 17, 23, 0.92);
       --menu-hover: rgba(255, 255, 255, 0.08);
-      --tooltip-bg: rgba(8, 9, 12, 0.92);
       --tooltip-text: #ffffff;
       --subtitle-bg: rgba(8, 9, 12, 0.82);
       --subtitle-text: #ffffff;
@@ -62,16 +67,20 @@
     /* 浅色外观：品牌青蓝渐变保留，中性色反转（浅底深字，确保文字与控件清晰） */
     :root[data-theme='light'] {
       --bg-obsidian: #eef2f7;
-      --panel-glass: rgba(255, 255, 255, 0.78);
       --panel-border: rgba(20, 45, 80, 0.14);
       --panel-border-glow: rgba(0, 130, 235, 0.35);
       --accent-text: #0284c7;
+      --accent-solid: #0284c7;
+      --accent-on-solid: #ffffff;
+      --accent-tint: rgba(2, 132, 199, 0.1);
+      --surface-raised: rgba(255, 255, 255, 0.97);
+      --ctrl-hover-bg: rgba(15, 23, 36, 0.07);
+      --dock-glass: rgba(255, 255, 255, 0.72);
       --cover-ring: rgba(20, 45, 80, 0.12);
       --text-primary: #101828;
       --text-secondary: #475467;
       --text-muted: #98a2b3;
       --titlebar-shadow: 0 1px 6px rgba(255, 255, 255, 0.78), 0 1px 2px rgba(255, 255, 255, 0.6);
-      --titlebar-icon-shadow: rgba(255, 255, 255, 0.7);
       --ghost-bg: rgba(255, 255, 255, 0.8);
       --ghost-hover: rgba(20, 45, 80, 0.1);
       --ghost-hover-border: rgba(20, 45, 80, 0.25);
@@ -82,16 +91,9 @@
       --music-title-shadow: 0 2px 16px rgba(4, 12, 24, 0.16);
       --bar-border: rgba(20, 45, 80, 0.18);
       --shadow-bar: 0 16px 40px rgba(30, 60, 100, 0.18);
-      --ctrl-bg: rgba(255, 255, 255, 0.7);
-      --ctrl-border: rgba(20, 45, 80, 0.16);
-      --ctrl-hover-border: rgba(20, 45, 80, 0.32);
-      --ctrl-text: #101828;
-      --ctrl-hover: rgba(0, 130, 235, 0.14);
       --track-bg: rgba(20, 45, 80, 0.14);
       --handle-bg: #14507a;
-      --menu-bg: rgba(255, 255, 255, 0.94);
       --menu-hover: rgba(20, 45, 80, 0.07);
-      --tooltip-bg: rgba(255, 255, 255, 0.95);
       --tooltip-text: #101828;
       --subtitle-bg: rgba(255, 255, 255, 0.88);
       --subtitle-text: #101828;
@@ -143,10 +145,9 @@
       position: absolute;
       inset: 8px;
       border: 2px dashed var(--accent-neon);
-      border-radius: 16px;
+      border-radius: var(--r-lg);
       pointer-events: none;
       z-index: 50;
-      box-shadow: inset 0 0 30px var(--accent-glow);
     }
 
     /* 顶部轻提示 Toast */
@@ -155,11 +156,10 @@
       top: 54px;
       left: 50%;
       transform: translateX(-50%);
-      background: var(--panel-glass);
-      backdrop-filter: blur(20px) saturate(180%);
+      background: var(--surface-raised);
       color: var(--text-primary);
       padding: 8px 20px;
-      border-radius: 20px;
+      border-radius: var(--r-full);
       font-size: 13px;
       font-weight: 500;
       z-index: 40;
@@ -373,14 +373,11 @@
       font-size: 14px;
       font-weight: 600;
       cursor: pointer;
-      box-shadow: 0 4px 20px var(--accent-glow);
-      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
     }
 
     .btn-primary:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 8px 28px rgba(0, 242, 254, 0.6);
-      filter: brightness(1.1);
+      transform: translateY(-1px);
     }
 
     .btn-ghost {
@@ -392,14 +389,13 @@
       font-size: 14px;
       font-weight: 500;
       cursor: pointer;
-      backdrop-filter: blur(10px);
-      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      transition: background-color 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
     }
 
     .btn-ghost:hover {
       background: var(--ghost-hover);
       border-color: var(--ghost-hover-border);
-      transform: translateY(-2px);
+      transform: translateY(-1px);
     }
 
     /* 自定义沉浸式无边框标题栏（全透明通栏：无毛玻璃底色，仅文字与按键；清晰度由字影/图标投影保障）。
@@ -417,7 +413,9 @@
       align-items: center;
       padding: 0 14px 0 18px;
       z-index: 20;
-      -webkit-app-region: drag;
+      /* 不使用 OS 级拖拽区：app-region:drag 会吞掉鼠标事件（悬停/停放时热区唤出与
+         保持显示失效）；窗口拖拽由 renderer.js 用 pointer 事件自行实现，事件全程可达 */
+      -webkit-app-region: no-drag;
       transition: opacity 0.12s ease-out; /* 近瞬时过渡：跟随鼠标弹出/收起，无"慢半拍"感 */
       opacity: 1;
     }
@@ -453,7 +451,6 @@
     .title-logo svg {
       width: 16px;
       height: 16px;
-      filter: drop-shadow(0 1px 2px var(--titlebar-icon-shadow));
     }
 
     #video-title {
@@ -465,26 +462,27 @@
       opacity: 0.85;
     }
 
-    /* 现代性感窗口控制按钮组 */
+    /* 窗口控制按钮组：贴住窗口右上角的原生式按键（非悬浮）。
+       44×42 矩形热区一直延伸到窗口边缘，视觉上属于窗口框架本身 */
     .window-controls {
       display: flex;
-      gap: 6px;
+      height: 42px;
+      margin-right: -14px; /* 抵消标题栏右侧内边距，按键贴住窗口角 */
       -webkit-app-region: no-drag;
     }
 
     .win-btn {
-      width: 28px;
-      height: 28px;
-      border-radius: 8px;
-      border: 1px solid transparent;
+      width: 44px;
+      height: 42px;
+      border-radius: 0;
+      border: none;
       background: transparent;
       color: var(--text-secondary);
       display: flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
-      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-      filter: drop-shadow(0 1px 2px var(--titlebar-icon-shadow)); /* 透明底上让图标投影可见（hover 背景仍正常显示） */
+      transition: background-color 0.15s ease, color 0.15s ease;
     }
 
     .win-btn svg {
@@ -499,15 +497,12 @@
 
     .win-btn:hover {
       background: var(--win-hover);
-      border-color: var(--win-hover-border);
       color: var(--text-primary);
     }
 
     .win-btn.close:hover {
-      background: rgba(255, 77, 79, 0.85);
-      border-color: rgba(255, 77, 79, 0.9);
+      background: #e81123;
       color: #ffffff;
-      box-shadow: 0 0 12px rgba(255, 77, 79, 0.4);
     }
 
     /* 现代无边框悬浮胶囊控制面板 (Floating Glass Dock) */
@@ -518,14 +513,15 @@
       transform: translateX(-50%);
       width: calc(100% - 48px);
       max-width: 900px;
-      padding: 14px 20px;
-      background: var(--panel-glass);
+      padding: 12px 18px;
+      background: var(--dock-glass);
+      backdrop-filter: blur(20px) saturate(160%);
       border: 1px solid var(--bar-border);
-      border-radius: 20px;
-      box-shadow: var(--shadow-bar), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+      border-radius: var(--r-lg);
+      box-shadow: var(--shadow-bar);
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 10px;
       z-index: 20;
       opacity: 1;
       pointer-events: auto;
@@ -575,7 +571,6 @@
       height: 12px;
       background: var(--handle-bg);
       border-radius: 50%;
-      box-shadow: 0 0 10px var(--accent-neon);
       opacity: 0;
       transition: opacity 0.2s ease, transform 0.2s ease;
     }
@@ -590,11 +585,10 @@
       position: absolute;
       bottom: 18px;
       transform: translateX(-50%);
-      background: var(--tooltip-bg);
-      backdrop-filter: blur(12px);
+      background: var(--surface-raised);
       color: var(--tooltip-text);
       padding: 4px 10px;
-      border-radius: 6px;
+      border-radius: var(--r-sm);
       font-size: 11px;
       font-weight: 500;
       display: none;
@@ -614,25 +608,34 @@
     .controls-left, .controls-right {
       display: flex;
       align-items: center;
-      gap: 14px;
+      gap: 8px;
     }
 
+    /* 职能分组细分隔线：画面设置 · 音量 · 工具 · 视图 */
+    .ctrl-divider {
+      width: 1px;
+      height: 18px;
+      background: var(--panel-border);
+      margin: 0 6px;
+      flex-shrink: 0;
+    }
+
+    /* 幽灵按钮：默认纯图标无边框，悬停浮现浅底，激活只染图标色 */
     .ctrl-btn {
-      background: var(--ctrl-bg);
-      border: 1px solid var(--ctrl-border);
-      color: var(--ctrl-text);
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
       font-size: 14px;
       font-weight: 500;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
-      width: 32px;
-      height: 32px;
-      border-radius: 8px;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      width: 34px;
+      height: 34px;
+      border-radius: var(--r-sm);
       padding: 0;
+      transition: color 0.15s ease, background-color 0.15s ease;
       -webkit-app-region: no-drag;
     }
 
@@ -647,16 +650,40 @@
     }
 
     .ctrl-btn:hover {
-      background: var(--ctrl-hover);
-      border-color: var(--ctrl-hover-border);
-      color: var(--ctrl-text);
-      box-shadow: 0 4px 12px rgba(0, 242, 254, 0.3);
-      transform: translateY(-1px) scale(1.04);
+      background: var(--ctrl-hover-bg);
+      color: var(--text-primary);
     }
 
     .ctrl-btn.active {
       color: var(--accent-text);
-      background: rgba(0, 242, 254, 0.12);
+      background: transparent;
+    }
+
+    /* 播放键：整个控制栏唯一的实心强调（圆角方形，纯色无渐变无发光） */
+    #btn-play {
+      width: 40px;
+      height: 40px;
+      border-radius: var(--r-md);
+      background: var(--accent-solid);
+      color: var(--accent-on-solid);
+      transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    #btn-play:hover {
+      background: var(--accent-solid);
+      color: var(--accent-on-solid);
+      transform: scale(1.05);
+    }
+
+    #btn-play:active {
+      transform: scale(0.96);
+    }
+
+    #btn-play svg {
+      width: 20px;
+      height: 20px;
+      fill: currentColor;
+      stroke: none;
     }
 
     /* 文字类型控制按钮（倍速/比例/字幕） */
@@ -701,7 +728,6 @@
     /* 超额增益警示：音量超过 100%（进入增益放大区）滑块变橙，提醒注意防爆音 */
     #volume-range.boost {
       accent-color: #ff8c00;
-      filter: drop-shadow(0 0 4px rgba(255, 140, 0, 0.6));
     }
 
     /* 浮动下拉菜单组件 (倍速、字幕、画面比例) */
@@ -714,17 +740,16 @@
       bottom: 42px;
       left: 50%;
       transform: translateX(-50%) translateY(8px);
-      background: var(--menu-bg);
+      background: var(--surface-raised);
       border: 1px solid var(--panel-border);
-      border-radius: 12px;
+      border-radius: var(--r-md);
       padding: 6px;
       display: flex;
       flex-direction: column;
       gap: 2px;
       z-index: 30;
-      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.7);
-      backdrop-filter: blur(20px) saturate(180%);
-      min-width: 100px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+      min-width: 110px;
       opacity: 0;
       pointer-events: none;
       transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
@@ -737,14 +762,32 @@
     }
 
     .menu-item {
-      padding: 7px 14px;
+      position: relative;
+      padding: 7px 14px 7px 30px;
       font-size: 12px;
       color: var(--text-secondary);
-      border-radius: 6px;
+      border-radius: var(--r-sm);
       cursor: pointer;
-      text-align: center;
-      transition: all 0.15s ease;
+      text-align: left;
+      transition: color 0.15s ease, background-color 0.15s ease;
       white-space: nowrap;
+    }
+
+    /* 选中态指示点：所有条目占位、仅激活项着色，保证文字左对齐 */
+    .menu-item::before {
+      content: '';
+      position: absolute;
+      left: 14px;
+      top: 50%;
+      width: 5px;
+      height: 5px;
+      margin-top: -2.5px;
+      border-radius: 50%;
+      background: transparent;
+    }
+
+    .menu-item.active::before {
+      background: var(--accent-text);
     }
 
     .menu-item:hover {
@@ -753,7 +796,6 @@
     }
 
     .menu-item.active {
-      background: rgba(0, 242, 254, 0.15);
       color: var(--accent-text);
       font-weight: 600;
     }
@@ -763,17 +805,16 @@
       position: absolute;
       bottom: 96px;
       left: 28px;
-      background: var(--panel-glass);
-      border: 1px solid var(--panel-border-glow);
+      background: var(--surface-raised);
+      border: 1px solid var(--panel-border);
       padding: 10px 18px;
-      border-radius: 20px;
+      border-radius: var(--r-full);
       display: none;
       align-items: center;
       gap: 12px;
       font-size: 13px;
       z-index: 25;
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6), 0 0 20px var(--accent-glow);
-      backdrop-filter: blur(20px);
+      box-shadow: var(--shadow-toast);
       animation: slideIn 0.3s cubic-bezier(0.16, 1, 0.3, 1);
       -webkit-app-region: no-drag;
     }
@@ -802,11 +843,10 @@
     #playlist-panel {
       position: absolute;
       top: 42px;
-      right: -300px;
-      width: 300px;
+      right: -320px;
+      width: 320px;
       height: calc(100vh - 42px);
-      background: var(--panel-glass);
-      backdrop-filter: blur(24px) saturate(180%);
+      background: var(--surface-raised);
       border-left: 1px solid var(--panel-border);
       z-index: 18;
       display: flex;
@@ -840,9 +880,12 @@
     }
 
     .playlist-count {
-      font-size: 12px;
+      font-size: 11px;
       color: var(--accent-text);
       font-weight: 500;
+      background: var(--accent-tint);
+      padding: 2px 9px;
+      border-radius: var(--r-full);
     }
 
     .ctrl-btn.small {
@@ -860,21 +903,23 @@
     .playlist-items {
       flex: 1;
       overflow-y: auto;
-      padding: 8px 0;
+      padding: 10px;
+      -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 22px, #000 calc(100% - 22px), transparent 100%);
+      mask-image: linear-gradient(to bottom, transparent 0, #000 22px, #000 calc(100% - 22px), transparent 100%);
     }
 
     .playlist-item {
-      padding: 10px 20px;
+      position: relative;
+      padding: 9px 10px;
       font-size: 13px;
       color: var(--text-secondary);
       cursor: pointer;
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      transition: all 0.2s ease;
+      border-radius: var(--r-sm);
+      transition: color 0.15s ease, background-color 0.15s ease;
       white-space: nowrap;
       overflow: hidden;
-      text-overflow: ellipsis;
     }
 
     .playlist-item:hover {
@@ -882,10 +927,75 @@
       color: var(--text-primary);
     }
 
+    /* 正在播放：左缘强调条 + 标题着色（替代整行染色） */
     .playlist-item.active {
-      background: rgba(0, 242, 254, 0.12);
+      background: transparent;
       color: var(--accent-text);
       font-weight: 500;
+    }
+
+    .playlist-item.active::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 9px;
+      bottom: 9px;
+      width: 3px;
+      border-radius: 2px;
+      background: var(--accent-text);
+    }
+
+    /* 序号列：等宽两位数；正在播放的条目换成三根跳动小均衡器 */
+    .item-index {
+      width: 26px;
+      flex-shrink: 0;
+      font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* 序号与均衡器双列共存，由 active 状态切换可见性
+      （playPlaylistItem 的轻量高亮路径只改 class 不重建 DOM，两份 DOM 都必须在场） */
+    .playlist-item .eq-indicator {
+      display: none;
+    }
+
+    .playlist-item.active .eq-indicator {
+      display: flex;
+    }
+
+    .playlist-item.active .item-index {
+      display: none;
+    }
+
+    .eq-indicator {
+      width: 26px;
+      height: 14px;
+      flex-shrink: 0;
+      align-items: flex-end;
+      gap: 2.5px;
+    }
+
+    .eq-indicator i {
+      width: 3px;
+      border-radius: 1px;
+      background: var(--accent-text);
+      transform-origin: bottom;
+      animation: eq-bounce 1s ease-in-out infinite;
+    }
+
+    .eq-indicator i:nth-child(1) { height: 8px; }
+    .eq-indicator i:nth-child(2) { height: 13px; animation-delay: 0.15s; }
+    .eq-indicator i:nth-child(3) { height: 10px; animation-delay: 0.3s; }
+
+    /* 暂停时均衡器同步静止（由 JS 切换 is-paused） */
+    .playlist-items.is-paused .eq-indicator i {
+      animation-play-state: paused;
+    }
+
+    @keyframes eq-bounce {
+      0%, 100% { transform: scaleY(0.4); }
+      50% { transform: scaleY(1); }
     }
 
     .playlist-item .item-name {
@@ -903,20 +1013,26 @@
       white-space: nowrap;
     }
 
-    .playlist-item .remove-btn {
-      margin-left: 8px;
+    .playlist-item .remove-btn,
+    .playlist-item .new-win-btn {
+      margin-left: 6px;
       opacity: 0;
-      font-size: 12px;
       color: var(--text-muted);
-      transition: opacity 0.2s, color 0.2s;
+      display: flex;
+      align-items: center;
+      cursor: pointer;
+      transition: opacity 0.15s ease, color 0.15s ease;
     }
 
-    .playlist-item .new-win-btn {
-      margin-left: 8px;
-      opacity: 0;
-      font-size: 13px;
-      color: var(--text-muted);
-      transition: opacity 0.2s, color 0.2s;
+    .playlist-item .remove-btn svg,
+    .playlist-item .new-win-btn svg {
+      width: 14px;
+      height: 14px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
     }
 
     .playlist-item:hover .remove-btn,
@@ -929,7 +1045,7 @@
     }
 
     .playlist-item .new-win-btn:hover {
-      color: var(--accent-neon);
+      color: var(--accent-text);
     }
 
     .playlist-empty {
@@ -938,6 +1054,26 @@
       font-size: 13px;
       color: var(--text-muted);
       line-height: 1.6;
+    }
+
+    /* 键盘可达性：仅键盘导航时显示焦点环 */
+    button:focus-visible,
+    .menu-item:focus-visible,
+    .resume-btn:focus-visible {
+      outline: 2px solid var(--accent-text);
+      outline-offset: 2px;
+    }
+
+    button:focus:not(:focus-visible) {
+      outline: none;
+    }
+
+    /* 尊重系统"减少动态效果"偏好 */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+      }
     }
   </style>
 </head>
@@ -1014,10 +1150,10 @@
           <path d="M210 170 L340 256 L210 342 Z" fill="url(#emptyNeon)"/>
         </svg>
       </div>
-      <h2>享受沉浸式无边框影音</h2>
-      <p>拖拽本地视频文件到此处，或点击下方按钮选择</p>
+      <h2>拖入文件，开始播放</h2>
+      <p>支持常见视频与音频格式，自动匹配同名字幕</p>
       <div class="empty-actions">
-        <button class="btn-primary" id="btn-open-file">选择本地视频</button>
+        <button class="btn-primary" id="btn-open-file">选择文件</button>
         <button class="btn-ghost" id="btn-open-folder">打开文件夹</button>
       </div>
     </div>
@@ -1085,10 +1221,61 @@
         </div>
 
         <div class="controls-right">
-          <!-- 外观主题切换（浅色 / 深色）：位于播放模式按键左手边 -->
+          <!-- 倍速选择菜单 -->
+          <div class="menu-popover-container">
+            <button class="ctrl-btn text-btn" id="btn-speed" title="倍速播放">1.0x</button>
+            <div class="popover-menu" id="speed-menu">
+              <div class="menu-item" data-speed="3.0">3.0x</div>
+              <div class="menu-item" data-speed="2.0">2.0x</div>
+              <div class="menu-item" data-speed="1.5">1.5x</div>
+              <div class="menu-item" data-speed="1.25">1.25x</div>
+              <div class="menu-item active" data-speed="1.0">1.0x</div>
+              <div class="menu-item" data-speed="0.75">0.75x</div>
+              <div class="menu-item" data-speed="0.5">0.5x</div>
+            </div>
+          </div>
+
+          <!-- 画面比例控制 -->
+          <div class="menu-popover-container">
+            <button class="ctrl-btn text-btn" id="btn-aspect" title="画面比例">自动</button>
+            <div class="popover-menu" id="aspect-menu">
+              <div class="menu-item active" data-aspect="auto">自动比例</div>
+              <div class="menu-item" data-aspect="16-9">16 : 9</div>
+              <div class="menu-item" data-aspect="4-3">4 : 3</div>
+              <div class="menu-item" data-aspect="cover">拉伸铺满</div>
+            </div>
+          </div>
+
+          <!-- 外挂字幕控制 -->
+          <div class="menu-popover-container">
+            <button class="ctrl-btn text-btn" id="btn-subtitle" title="外挂字幕 (CC)">CC</button>
+            <div class="popover-menu" id="subtitle-menu">
+              <div class="menu-item" id="btn-load-sub">加载字幕文件...</div>
+              <div class="menu-item" id="btn-toggle-sub">隐藏字幕</div>
+              <div class="menu-item" id="btn-sub-size-up">字号 +</div>
+              <div class="menu-item" id="btn-sub-size-down">字号 -</div>
+              <div class="menu-item" id="btn-sub-offset-up">字幕延后 0.5s</div>
+              <div class="menu-item" id="btn-sub-offset-down">字幕提前 0.5s</div>
+            </div>
+          </div>
+
+          <span class="ctrl-divider" aria-hidden="true"></span>
+
+          <!-- 音量调控 -->
+          <div class="volume-container">
+            <button class="ctrl-btn" id="btn-volume" title="音量/静音">
+              <svg viewBox="0 0 24 24" id="icon-volume-state"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+            </button>
+            <div class="volume-slider-wrapper">
+              <input type="range" id="volume-range" min="0" max="2" step="0.05" value="1" title="音量 0%~200%">
+            </div>
+          </div>
+
+          <span class="ctrl-divider" aria-hidden="true"></span>
+
+          <!-- 外观主题切换（浅色 / 深色） -->
           <button class="ctrl-btn" id="btn-appearance" title="切换到浅色外观" aria-label="切换外观主题">
             <svg viewBox="0 0 24 24" id="icon-appearance-state">
-              <!-- 深色主题默认显示太阳（点击切浅色）；浅色主题由 JS 换为月亮 -->
               <circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.77 1.77M17.33 17.33l1.77 1.77M4.9 19.1l1.77-1.77M17.33 6.67l1.77-1.77"/>
             </svg>
           </button>
@@ -1098,7 +1285,6 @@
             <button class="ctrl-btn" id="btn-play-mode" title="播放模式">
               <svg viewBox="0 0 24 24">
                 <g id="icon-playmode-state">
-                  <!-- 默认全部循环模式图标 -->
                   <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
                 </g>
               </svg>
@@ -1120,53 +1306,7 @@
             <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
           </button>
 
-          <!-- 外挂字幕控制 -->
-          <div class="menu-popover-container">
-            <button class="ctrl-btn text-btn" id="btn-subtitle" title="外挂字幕 (CC)">CC</button>
-            <div class="popover-menu" id="subtitle-menu">
-              <div class="menu-item" id="btn-load-sub">加载字幕文件...</div>
-              <div class="menu-item" id="btn-toggle-sub">隐藏字幕</div>
-              <div class="menu-item" id="btn-sub-size-up">字号 +</div>
-              <div class="menu-item" id="btn-sub-size-down">字号 -</div>
-              <div class="menu-item" id="btn-sub-offset-up">字幕延后 0.5s</div>
-              <div class="menu-item" id="btn-sub-offset-down">字幕提前 0.5s</div>
-            </div>
-          </div>
-
-          <!-- 画面比例控制 -->
-          <div class="menu-popover-container">
-            <button class="ctrl-btn text-btn" id="btn-aspect" title="画面比例">自动</button>
-            <div class="popover-menu" id="aspect-menu">
-              <div class="menu-item active" data-aspect="auto">自动比例</div>
-              <div class="menu-item" data-aspect="16-9">16 : 9</div>
-              <div class="menu-item" data-aspect="4-3">4 : 3</div>
-              <div class="menu-item" data-aspect="cover">拉伸铺满</div>
-            </div>
-          </div>
-
-          <!-- 倍速选择菜单 -->
-          <div class="menu-popover-container">
-            <button class="ctrl-btn text-btn" id="btn-speed" title="倍速播放">1.0x</button>
-            <div class="popover-menu" id="speed-menu">
-              <div class="menu-item" data-speed="3.0">3.0x</div>
-              <div class="menu-item" data-speed="2.0">2.0x</div>
-              <div class="menu-item" data-speed="1.5">1.5x</div>
-              <div class="menu-item" data-speed="1.25">1.25x</div>
-              <div class="menu-item active" data-speed="1.0">1.0x</div>
-              <div class="menu-item" data-speed="0.75">0.75x</div>
-              <div class="menu-item" data-speed="0.5">0.5x</div>
-            </div>
-          </div>
-
-          <!-- 音量调控 -->
-          <div class="volume-container">
-            <button class="ctrl-btn" id="btn-volume" title="音量/静音">
-              <svg viewBox="0 0 24 24" id="icon-volume-state"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
-            </button>
-            <div class="volume-slider-wrapper">
-              <input type="range" id="volume-range" min="0" max="2" step="0.05" value="1" title="音量 0%~200%">
-            </div>
-          </div>
+          <span class="ctrl-divider" aria-hidden="true"></span>
 
           <!-- 全屏切换 -->
           <button class="ctrl-btn" id="btn-fullscreen" title="全屏 (F11)">
