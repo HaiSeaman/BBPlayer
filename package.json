@@ -1,11 +1,12 @@
 {
   "name": "bb-player",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "BBPlayer",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win"
+    "build": "electron-builder --win",
+    "verify": "node verify-exts.js"
   },
   "keywords": [
     "player",
@@ -31,6 +32,7 @@
       "renderer.js",
       "index.html",
       "shared-video-exts.js",
+      "shared-subtitle-exts.js",
       "package.json",
       "build/**/*"
     ],
@@ -64,7 +66,8 @@
           "aac"
         ],
         "name": "Media File",
-        "role": "Viewer"
+        "role": "Viewer",
+        "icon": "build/icon.ico"
       }
     ],
     "win": {

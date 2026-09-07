@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; media-src 'self' file: blob:; img-src 'self' file: data: blob:;">
+<html lang="zh-CN" data-page-node-id="jQLm0vlmW9XaG1NbbW1ygm">
+<head data-page-node-id="RCnWP9vLIeGFCkCMe7nJX9">
+  <meta charset="UTF-8" data-page-node-id="nFoa99crFm5FDwrRwfqew9">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; media-src 'self' file: blob:; img-src 'self' file: data: blob:;" data-page-node-id="xGdjYv5JMGBsnl291v1D9x">
   <title>BBPlayer</title>
   <style>
     :root {
@@ -13,10 +13,19 @@
       /* 强调文字色：深色主题用亮青，浅色主题用深青蓝，保证对比度（青色纯色在浅底上不可读） */
       --accent-text: #00f2fe;
       --accent-gradient: linear-gradient(135deg, #00f2fe 0%, #4facfe 100%);
-      /* 播放键唯一实心强调（点元素纯色，渐变只留给进度条） */
-      --accent-solid: #00f2fe;
-      --accent-on-solid: #051019;
+      /* 播放键唯一实心强调改用彩虹渐变 --rainbow-gradient，纯色强调变量已移除 */
       --accent-tint: rgba(0, 242, 254, 0.1);
+      /* 彩虹渐变色标单一来源（--rw-1..7）：CSS 渐变与三处 SVG 渐变（#rainbowPlay/#logoGlow/#emptyNeon，
+         经 .rw-* 类引用）共用同一组值，改品牌色只需改这里 */
+      --rw-1: #ff3b4e;
+      --rw-2: #ff8a00;
+      --rw-3: #ffd400;
+      --rw-4: #2ecc5b;
+      --rw-5: #00c2ff;
+      --rw-6: #2e6bff;
+      --rw-7: #a24bff;
+      /* 彩虹渐变（品牌主题）：应用图标/播放键/进度条/Logo 共用，横向红→紫 */
+      --rainbow-gradient: linear-gradient(90deg, var(--rw-1) 0%, var(--rw-2) 18%, var(--rw-3) 36%, var(--rw-4) 52%, var(--rw-5) 68%, var(--rw-6) 84%, var(--rw-7) 100%);
       /* 统一圆角刻度（四档） */
       --r-sm: 8px;
       --r-md: 12px;
@@ -51,8 +60,8 @@
       --subtitle-bg: rgba(8, 9, 12, 0.82);
       --subtitle-text: #ffffff;
       --item-hover: rgba(255, 255, 255, 0.05);
-      --win-hover: rgba(255, 255, 255, 0.08);
-      --win-hover-border: rgba(255, 255, 255, 0.12);
+      /* 窗口按键悬停底色：深色调块（深浅两主题下都比背景醒目），图标默认用主文字色 */
+      --win-hover: rgba(30, 41, 59, 0.85);
       --shadow-drawer: -10px 0 30px rgba(0, 0, 0, 0.6);
       --shadow-toast: 0 10px 30px rgba(0, 0, 0, 0.6);
       --shadow-cover: 0 26px 70px rgba(0, 0, 0, 0.55);
@@ -70,8 +79,6 @@
       --panel-border: rgba(20, 45, 80, 0.14);
       --panel-border-glow: rgba(0, 130, 235, 0.35);
       --accent-text: #0284c7;
-      --accent-solid: #0284c7;
-      --accent-on-solid: #ffffff;
       --accent-tint: rgba(2, 132, 199, 0.1);
       --surface-raised: rgba(255, 255, 255, 0.97);
       --ctrl-hover-bg: rgba(15, 23, 36, 0.07);
@@ -98,8 +105,7 @@
       --subtitle-bg: rgba(255, 255, 255, 0.88);
       --subtitle-text: #101828;
       --item-hover: rgba(20, 45, 80, 0.06);
-      --win-hover: rgba(20, 45, 80, 0.08);
-      --win-hover-border: rgba(20, 45, 80, 0.2);
+      --win-hover: rgba(20, 45, 80, 0.14);
       --shadow-drawer: -10px 0 24px rgba(30, 60, 100, 0.16);
       --shadow-toast: 0 10px 26px rgba(30, 60, 100, 0.18);
       --shadow-cover: 0 26px 70px rgba(30, 60, 100, 0.28);
@@ -110,6 +116,15 @@
       --cover-fallback: rgba(16, 24, 40, 0.4);
       --logo-bg: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.85) 0%, rgba(255, 255, 255, 0.4) 100%);
     }
+
+    /* 彩虹色标单一来源：三处 SVG 渐变的 stop 经类引用 :root 的 --rw-* 变量 */
+    .rw-1 { stop-color: var(--rw-1); }
+    .rw-2 { stop-color: var(--rw-2); }
+    .rw-3 { stop-color: var(--rw-3); }
+    .rw-4 { stop-color: var(--rw-4); }
+    .rw-5 { stop-color: var(--rw-5); }
+    .rw-6 { stop-color: var(--rw-6); }
+    .rw-7 { stop-color: var(--rw-7); }
 
     * {
       box-sizing: border-box;
@@ -226,7 +241,10 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      background: linear-gradient(135deg, rgba(0, 242, 254, 0.14), rgba(79, 172, 254, 0.14));
+      background: linear-gradient(135deg,
+        rgba(255, 59, 78, 0.14) 0%, rgba(255, 212, 0, 0.14) 25%,
+        rgba(46, 204, 91, 0.14) 50%, rgba(0, 194, 255, 0.14) 75%,
+        rgba(162, 75, 255, 0.14) 100%);
       color: var(--cover-fallback);
     }
     #music-cover-fallback svg {
@@ -477,7 +495,8 @@
       border-radius: 0;
       border: none;
       background: transparent;
-      color: var(--text-secondary);
+      /* 与左侧 BBPLAYER 字样同色（--text-primary）：深色主题即纯白，避免灰图标看不清 */
+      color: var(--text-primary);
       display: flex;
       align-items: center;
       justify-content: center;
@@ -551,22 +570,25 @@
       border-radius: 4px;
     }
 
+    /* 彩虹进度条：填充层恒为全宽彩虹渐变，用 --progress 变量经 clip-path 裁剪。
+       这样色带位置固定不随进度压缩变形（若把渐变设在变宽的填充层上，颜色会被压缩） */
     #progress-fill {
       position: absolute;
       left: 0;
       top: 0;
       height: 100%;
-      width: 0%;
-      background: var(--accent-gradient);
+      width: 100%;
+      background: var(--rainbow-gradient);
+      clip-path: inset(0 calc(100% - var(--progress, 0%)) 0 0 round 4px);
       border-radius: 4px;
-      transition: width 0.05s linear;
+      transition: clip-path 0.05s linear;
     }
 
     #progress-handle {
       position: absolute;
-      right: -6px;
+      left: var(--progress, 0%);
       top: 50%;
-      transform: translateY(-50%);
+      transform: translate(-50%, -50%);
       width: 12px;
       height: 12px;
       background: var(--handle-bg);
@@ -577,7 +599,7 @@
 
     #progress-container:hover #progress-handle {
       opacity: 1;
-      transform: translateY(-50%) scale(1.1);
+      transform: translate(-50%, -50%) scale(1.1);
     }
 
     /* 时间 Hover 气泡提示 */
@@ -659,19 +681,19 @@
       background: transparent;
     }
 
-    /* 播放键：整个控制栏唯一的实心强调（圆角方形，纯色无渐变无发光） */
+    /* 播放键：透明底色，播放/暂停图标本身呈彩虹渐变（与应用图标同语言）。
+       渐变 defs 放在按钮内独立 svg 中：updatePlayPauseUI 会重写图标 svg 的 innerHTML，
+       定义若放在其内部会被抹掉；跨 svg 引用 url(#rainbowPlay) 在同文档内有效 */
     #btn-play {
       width: 40px;
       height: 40px;
       border-radius: var(--r-md);
-      background: var(--accent-solid);
-      color: var(--accent-on-solid);
+      background: transparent;
+      color: var(--text-primary);
       transition: transform 0.15s cubic-bezier(0.16, 1, 0.3, 1);
     }
 
     #btn-play:hover {
-      background: var(--accent-solid);
-      color: var(--accent-on-solid);
       transform: scale(1.05);
     }
 
@@ -680,10 +702,17 @@
     }
 
     #btn-play svg {
-      width: 20px;
-      height: 20px;
+      width: 24px;
+      height: 24px;
       fill: currentColor;
       stroke: none;
+    }
+
+    /* 渐变定义容器：0 尺寸不可见（内联样式覆盖 .ctrl-btn svg 的尺寸规则） */
+    #btn-play .svg-defs {
+      width: 0;
+      height: 0;
+      position: absolute;
     }
 
     /* 文字类型控制按钮（倍速/比例/字幕） */
@@ -1077,245 +1106,262 @@
     }
   </style>
 </head>
-<body>
+<body data-page-node-id="TBkILlkeTc2A09vOEPqaRm">
 
-  <div id="player-container">
+  <div id="player-container" data-page-node-id="YjJSMGO6r9LGGr6HXfZhAr">
     <!-- 无边框自定义标题栏 -->
-    <div id="titlebar">
-      <div class="title-area">
-        <span class="title-logo">
-          <svg viewBox="0 0 24 24" fill="none">
-            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="url(#logoGlow)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            <defs>
-              <linearGradient id="logoGlow" x1="0" y1="0" x2="24" y2="24">
-                <stop offset="0%" stop-color="#00f2fe"/>
-                <stop offset="100%" stop-color="#4facfe"/>
+    <div id="titlebar" data-page-node-id="qSudksNA6qyuiwtlFerz09">
+      <div class="title-area" data-page-node-id="RH5glUYtUiZDhVjtx7HWUc">
+        <span class="title-logo" data-page-node-id="b30QvofhgDVQzXmtZChFLJ">
+          <svg viewBox="0 0 24 24" fill="none" data-page-node-id="Xt4E3KM2WDxl1HvJwZYjKw">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" stroke="url(#logoGlow)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-page-node-id="4sKbjBlVxhThXoaXHVIgQ5"/>
+            <defs data-page-node-id="KhJ81NliBdjqaqRY7PfZjm">
+              <linearGradient id="logoGlow" x1="0" y1="0" x2="24" y2="24" data-page-node-id="4eMTA9CDUWCrn2EFRT2V06">
+                <stop offset="0%" class="rw-1" data-page-node-id="EPg9FBkVZDeKH1Fv7yLlW5"/>
+                <stop offset="25%" class="rw-3" data-page-node-id="GWZjBaJjByKlvg4vmoFrPQ"/>
+                <stop offset="50%" class="rw-4" data-page-node-id="Ms2gdsMBcjFSxw1op9al4N"/>
+                <stop offset="75%" class="rw-5" data-page-node-id="FmJlWK3xRvdsaa8dACNO7z"/>
+                <stop offset="100%" class="rw-7" data-page-node-id="ri9h2h8zklu2V41f9MFnhb"/>
               </linearGradient>
             </defs>
           </svg>
           BBPLAYER
         </span>
-        <span id="video-title">极简本地视频播放器</span>
+        <span id="video-title" data-page-node-id="CK6efAIrfXN5RDsBMH9dkx">极简本地视频播放器</span>
       </div>
       <!-- 现代极简窗口控制组 -->
-      <div class="window-controls">
-        <button class="win-btn" id="btn-minimize" title="最小化">
-          <svg viewBox="0 0 12 12"><path d="M2 6h8"/></svg>
+      <div class="window-controls" data-page-node-id="lHbdoGfCxbNGGl53xYQRyG">
+        <button class="win-btn" id="btn-minimize" title="最小化" data-page-node-id="GxaFQSFuHSiZDfLTZJK407">
+          <svg viewBox="0 0 12 12" data-page-node-id="eYlPqyInTlGgWZwAR6ckvQ"><path d="M2 6h8" data-page-node-id="KDcT8Gz3FWautBKkD3QhKZ"/></svg>
         </button>
-        <button class="win-btn" id="btn-maximize" title="最大化/还原">
-          <svg viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" rx="1.5"/></svg>
+        <button class="win-btn" id="btn-maximize" title="最大化/还原" data-page-node-id="Hpzf0CyI7r2ZoN4Zij5Suv">
+          <svg viewBox="0 0 12 12" data-page-node-id="tNEaZfYlqcwG2foeERWlhZ"><rect x="2" y="2" width="8" height="8" rx="1.5" data-page-node-id="gsggaqDcGDDcnPS4PCDtcQ"/></svg>
         </button>
-        <button class="win-btn close" id="btn-close" title="关闭">
-          <svg viewBox="0 0 12 12"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7"/></svg>
+        <button class="win-btn close" id="btn-close" title="关闭" data-page-node-id="z1jtD6Lh8LaKjBGPBX15w8">
+          <svg viewBox="0 0 12 12" data-page-node-id="d0ZehAcK3xh9G66yGbrOIm"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" data-page-node-id="HlzmCCKVyBLdTKe1rzO6dy"/></svg>
         </button>
       </div>
     </div>
 
     <!-- 视频渲染 DOM -->
-    <video id="main-video"></video>
+    <video id="main-video" data-page-node-id="9n92Xyi70CgNGNoEQqyKeT"></video>
 
     <!-- 纯音频音乐播放效果层（频谱可视化 + 封面 + 歌名） -->
-    <div id="music-visualizer">
-      <div class="music-cover-frame">
-        <img id="music-cover-img" alt="专辑封面" />
-        <div id="music-cover-fallback">
-          <svg viewBox="0 0 24 24">
-            <path d="M9 18V5l12-2v13"/>
-            <circle cx="6" cy="18" r="3"/>
-            <circle cx="18" cy="16" r="3"/>
+    <div id="music-visualizer" data-page-node-id="TBDjP7XI5yp04gQcrnlrCT">
+      <div class="music-cover-frame" data-page-node-id="vU1Y8BnBkomVycBAFUyBeD">
+        <img id="music-cover-img" alt="专辑封面" data-page-node-id="ffIe9Lt4HAqr5QBOIUqg2R" />
+        <div id="music-cover-fallback" data-page-node-id="WtYbjkO33xd3NLeEkymFsP">
+          <svg viewBox="0 0 24 24" data-page-node-id="bpsBN6KRkncjgvzJbkz4R5">
+            <path d="M9 18V5l12-2v13" data-page-node-id="UA43YfRBy0VvZiqoptVeHA"/>
+            <circle cx="6" cy="18" r="3" data-page-node-id="xlJD2RVGqVWez8MBGGZWWa"/>
+            <circle cx="18" cy="16" r="3" data-page-node-id="41Ibenhm401bbJFuOFD0ZM"/>
           </svg>
         </div>
       </div>
-      <h2 class="music-title" id="music-title">未命名曲目</h2>
-      <div class="music-meta" id="music-meta"></div>
-      <canvas id="music-spectrum"></canvas>
+      <h2 class="music-title" id="music-title" data-page-node-id="3ncZM6woDxFgMtUgMeCUim">未命名曲目</h2>
+      <div class="music-meta" id="music-meta" data-page-node-id="iN4Q3lWviNl7IAtSDk2g89"></div>
+      <canvas id="music-spectrum" data-page-node-id="GS6Hw6l5lPM83wrvZn2MdK"></canvas>
     </div>
 
     <!-- 自定义外挂字幕渲染区 -->
-    <div id="custom-subtitle-overlay">
-      <span id="custom-subtitle-text" style="display: none;"></span>
+    <div id="custom-subtitle-overlay" data-page-node-id="YO90J1W4z7NfTnsVtsTfe6">
+      <span id="custom-subtitle-text" style="display: none;" data-page-node-id="2DWi5lUBSiePAAtQ48gdHP"></span>
     </div>
 
     <!-- 空状态 - 黑曜透镜晶体视觉 -->
-    <div id="empty-state">
-      <div class="brand-logo-container">
-        <svg width="48" height="48" viewBox="0 0 512 512" fill="none">
-          <defs>
-            <linearGradient id="emptyNeon" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stop-color="#00F2FE"/>
-              <stop offset="100%" stop-color="#4FACFE"/>
+    <div id="empty-state" data-page-node-id="FdnwQMbKUKBV8r8B7FlWZ4">
+      <div class="brand-logo-container" data-page-node-id="YeJCzZiV0Fp1Ev0WZRs9Ak">
+        <svg width="48" height="48" viewBox="0 0 512 512" fill="none" data-page-node-id="OkMtCXn8DqTreHjKAMky9w">
+          <defs data-page-node-id="TYEVp2wKYg0loZYjzJ8EDD">
+            <linearGradient id="emptyNeon" x1="0%" y1="0%" x2="100%" y2="100%" data-page-node-id="PUPNhpFc4dgmpQFWP26hxp">
+              <stop offset="0%" class="rw-1" data-page-node-id="KcYmU99Kr4okxqmqF2TzJ6"/>
+              <stop offset="25%" class="rw-3" data-page-node-id="79vsJshJDcvfVxFJXbv7rt"/>
+              <stop offset="50%" class="rw-4" data-page-node-id="AjDBVP56KcFFzrTSbxPWYw"/>
+              <stop offset="75%" class="rw-5" data-page-node-id="f6NNWtjcD2tptfeALGVSsk"/>
+              <stop offset="100%" class="rw-7" data-page-node-id="hQMkir9GKLP3XjFBHQLnoV"/>
             </linearGradient>
           </defs>
-          <path class="logo-blob" d="M180 140 C180 140, 290 140, 340 190 C380 230, 360 280, 310 300 C370 320, 380 380, 320 420 C270 450, 180 450, 180 450 Z" fill="rgba(255, 255, 255, 0.05)" stroke="rgba(255, 255, 255, 0.2)" stroke-width="6"/>
-          <path d="M210 170 L340 256 L210 342 Z" fill="url(#emptyNeon)"/>
+          <path class="logo-blob" d="M180 140 C180 140, 290 140, 340 190 C380 230, 360 280, 310 300 C370 320, 380 380, 320 420 C270 450, 180 450, 180 450 Z" fill="rgba(255, 255, 255, 0.05)" stroke="rgba(255, 255, 255, 0.2)" stroke-width="6" data-page-node-id="aaW3iuS7dNfo1yzBw60a4S"/>
+          <path d="M210 170 L340 256 L210 342 Z" fill="url(#emptyNeon)" data-page-node-id="WlRxI1uiDthHNnDFH9PI4b"/>
         </svg>
       </div>
-      <h2>拖入文件，开始播放</h2>
-      <p>支持常见视频与音频格式，自动匹配同名字幕</p>
-      <div class="empty-actions">
-        <button class="btn-primary" id="btn-open-file">选择文件</button>
-        <button class="btn-ghost" id="btn-open-folder">打开文件夹</button>
+      <h2 data-page-node-id="pVOW8KJxqKEoOys7eFXESb">拖入文件，开始播放</h2>
+      <p data-page-node-id="zpQzGui0Z3M5JyBZUSGDN3">支持常见视频与音频格式，自动匹配同名字幕</p>
+      <div class="empty-actions" data-page-node-id="MY0GkpVOuldj6V1aIbjLk0">
+        <button class="btn-primary" id="btn-open-file" data-page-node-id="OKaNjV4QmjjHeVDEIC2T3W">选择文件</button>
+        <button class="btn-ghost" id="btn-open-folder" data-page-node-id="d0nwMsLYbh8fWCJvd6OtUs">打开文件夹</button>
       </div>
     </div>
 
     <!-- 上次播放记忆续播提示条 -->
-    <div id="resume-toast">
-      <span>检测到您上次看到 <b id="resume-time-str">00:00</b></span>
-      <span class="resume-btn" id="btn-do-resume">跳转续播</span>
-      <span class="resume-close" id="btn-dismiss-resume">✕</span>
+    <div id="resume-toast" data-page-node-id="dbkOTyi3DBOvuFdoxSJY2j">
+      <span data-page-node-id="UxEEw5K7PJZ7grnjB4UDLi">检测到您上次看到 <b id="resume-time-str" data-page-node-id="aL86uEPoGClXmraeenvvGW">00:00</b></span>
+      <span class="resume-btn" id="btn-do-resume" data-page-node-id="ERGD9GPseBbuFCBmzNDELL">跳转续播</span>
+      <span class="resume-close" id="btn-dismiss-resume" data-page-node-id="s8T9ldiBSCvjBM59mbxVAY">✕</span>
     </div>
 
     <!-- 右侧播放列表抽屉面板 -->
-    <div id="playlist-panel">
-      <div class="playlist-header">
-        <h3>播放列表</h3>
-        <div class="playlist-actions">
-          <span class="playlist-count" id="playlist-count">0 个视频</span>
-          <button class="ctrl-btn small" id="btn-add-folder" title="添加文件夹中的视频">
-            <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+    <div id="playlist-panel" data-page-node-id="tgvicmuDYCPWin4NJtfThc">
+      <div class="playlist-header" data-page-node-id="0DrVB6HLXEcG7NYpemg88W">
+        <h3 data-page-node-id="AnhuED8zrE9GVy7uTxo1e0">播放列表</h3>
+        <div class="playlist-actions" data-page-node-id="71xDZLZ8gTis8I8QQ5Ve6r">
+          <span class="playlist-count" id="playlist-count" data-page-node-id="lEJRTpbeC5dAc36g6rKcdk">0 个视频</span>
+          <button class="ctrl-btn small" id="btn-add-folder" title="添加文件夹中的视频" data-page-node-id="DSuZfzCSKN0RtytAuDk57k">
+            <svg viewBox="0 0 24 24" data-page-node-id="K0SOq1I4eRIwVxl3CPIaER"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" data-page-node-id="oiIMBOsTzHc4A6vD89hBEn"/></svg>
           </button>
-          <button class="ctrl-btn small" id="btn-new-window" title="在新窗口播放当前视频">
-            <svg viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          <button class="ctrl-btn small" id="btn-new-window" title="在新窗口播放当前视频" data-page-node-id="v6bZtHYFNFvaxELPEPeyRy">
+            <svg viewBox="0 0 24 24" data-page-node-id="MpOUwysyrfqpWt99O9XGYQ"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" data-page-node-id="eZT0lf8VUeTt2zBs8dAH9w"/><polyline points="15 3 21 3 21 9" data-page-node-id="VcJ6V8YDhDaeSHP58zBnsu"/><line x1="10" y1="14" x2="21" y2="3" data-page-node-id="nUkplZgvRBMDvGva7eTmlr"/></svg>
           </button>
-          <button class="ctrl-btn small" id="btn-history-view" title="观看历史记录">
-            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <button class="ctrl-btn small" id="btn-history-view" title="观看历史记录" data-page-node-id="TW2bSfZPfBKDS7KyxizyWn">
+            <svg viewBox="0 0 24 24" data-page-node-id="bgfFDMVfHzZqrTP3Tfxudu"><circle cx="12" cy="12" r="10" data-page-node-id="45R6o9Uv70BegM3JCMVrHI"/><polyline points="12 6 12 12 16 14" data-page-node-id="Hq3Z0gcCj6HTTi5bZXgVO9"/></svg>
           </button>
-          <button class="ctrl-btn small" id="btn-playlist-clear" title="清空播放列表">
-            <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          <button class="ctrl-btn small" id="btn-playlist-clear" title="清空播放列表" data-page-node-id="cCGQ6V2TQAJiJ2WhxbX0pA">
+            <svg viewBox="0 0 24 24" data-page-node-id="48oV9DJJQwApozMJq8HcBu"><polyline points="3 6 5 6 21 6" data-page-node-id="ZTebq6jshzNjec4zlVqAS9"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" data-page-node-id="JeJpWqBxhmj8GPUhwfUgeA"/></svg>
           </button>
         </div>
       </div>
-      <div class="playlist-items" id="playlist-items">
-        <div class="playlist-empty">暂无播放视频<br>拖拽多个视频到此处添加</div>
+      <div class="playlist-items" id="playlist-items" data-page-node-id="u3gYyt4ZojosFeOFF9hpc0">
+        <div class="playlist-empty" data-page-node-id="XHs79axHcQKImTYYYZFTd4">暂无播放视频<br data-page-node-id="ypgrt4PnDEHzxImQTiBhSL">拖拽多个视频到此处添加</div>
       </div>
     </div>
 
     <!-- 顶部消息 Toast -->
-    <div id="global-toast"></div>
+    <div id="global-toast" data-page-node-id="N0eIvNJ8XQ8I9bnhkZwFP8"></div>
 
     <!-- 悬浮胶囊控制面板 (Floating Glass Dock) -->
-    <div id="controls-overlay">
-      <!-- 时间精准 Seek 进度条 -->
-      <div id="progress-container">
-        <div id="progress-fill">
-          <div id="progress-handle"></div>
-        </div>
-        <div id="progress-tooltip">00:00</div>
+    <div id="controls-overlay" data-page-node-id="dUljHEToOsrUf1WTAk0vDB">
+      <!-- 时间精准 Seek 进度条（把手在填充层外：填充层被 clip-path 裁剪，把手留在内部会被裁掉） -->
+      <div id="progress-container" data-page-node-id="zUZ23DV6OcOsXjDl30sTTC">
+        <div id="progress-fill" data-page-node-id="CCZxUGkO4oACqGZYEMwsJM"></div>
+        <div id="progress-handle" data-page-node-id="QP8mFwkAIjYocIBrHJQu3d"></div>
+        <div id="progress-tooltip" data-page-node-id="b537mGv4lfTGmKTFWoB69i">00:00</div>
       </div>
 
       <!-- 控制按键栏 -->
-      <div class="controls-row">
-        <div class="controls-left">
-          <button class="ctrl-btn" id="btn-prev" title="上一个视频">
-            <svg viewBox="0 0 24 24"><polygon points="19 20 9 12 19 4 19 20"/><line x1="5" y1="19" x2="5" y2="5"/></svg>
+      <div class="controls-row" data-page-node-id="qN8Ga1GICeM46pyBRbfIq7">
+        <div class="controls-left" data-page-node-id="2IWDOoDGe0SG0I7UEC6aLQ">
+          <button class="ctrl-btn" id="btn-prev" title="上一个视频" data-page-node-id="KAWizvILqcwfBtXH2EgSk3">
+            <svg viewBox="0 0 24 24" data-page-node-id="68zOiX6ZVDMp4qvGkrDSuM"><polygon points="19 20 9 12 19 4 19 20" data-page-node-id="WFCVU9yblvH5E53ITpDO8C"/><line x1="5" y1="19" x2="5" y2="5" data-page-node-id="4JJ6MKQPQtdjl7GiZqaaES"/></svg>
           </button>
-          <button class="ctrl-btn" id="btn-play" title="播放/暂停 (Space)">
-            <svg viewBox="0 0 24 24" id="icon-play-state"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          <button class="ctrl-btn" id="btn-play" title="播放/暂停 (Space)" data-page-node-id="EyF76vXINm8TQqXuyvnNok">
+            <!-- 彩虹渐变定义（独立 svg 承载：图标 svg 的 innerHTML 会被 JS 重写，defs 不能放里面） -->
+            <svg class="svg-defs" aria-hidden="true" data-page-node-id="Jj4qo6RAlxeDcJdFoYRtid">
+              <defs>
+                <linearGradient id="rainbowPlay" x1="0" y1="0" x2="24" y2="0" gradientUnits="userSpaceOnUse">
+                  <stop offset="0%" class="rw-1"/>
+                  <stop offset="25%" class="rw-3"/>
+                  <stop offset="50%" class="rw-4"/>
+                  <stop offset="75%" class="rw-5"/>
+                  <stop offset="100%" class="rw-7"/>
+                </linearGradient>
+              </defs>
+            </svg>
+            <svg viewBox="0 0 24 24" id="icon-play-state"><polygon points="5 3 19 12 5 21 5 3" fill="url(#rainbowPlay)"/></svg>
           </button>
-          <button class="ctrl-btn" id="btn-next" title="下一个视频">
-            <svg viewBox="0 0 24 24"><polygon points="5 4 15 12 5 20 5 4"/><line x1="19" y1="5" x2="19" y2="19"/></svg>
+          <button class="ctrl-btn" id="btn-next" title="下一个视频" data-page-node-id="OL6cjdQN0gWDykRURaujO7">
+            <svg viewBox="0 0 24 24" data-page-node-id="SaLa2tKC7IiChc25uw2ulJ"><polygon points="5 4 15 12 5 20 5 4" data-page-node-id="9GcSAmtAAgOPpLRBwyIm1T"/><line x1="19" y1="5" x2="19" y2="19" data-page-node-id="073dWmRF9McSkiIpZ1sa7C"/></svg>
           </button>
-          <div class="time-display">
-            <span id="current-time">00:00</span> / <span id="duration-time">00:00</span>
+          <div class="time-display" data-page-node-id="NqEeGfOuVTybfAXm4XHeqH">
+            <span id="current-time" data-page-node-id="sjJ507m8rWG8wHCaVebAeH">00:00</span> / <span id="duration-time" data-page-node-id="r2JOOTv5mw1yRkc9ME2hvQ">00:00</span>
           </div>
         </div>
 
-        <div class="controls-right">
+        <div class="controls-right" data-page-node-id="zvmrZdf9ZDpYsUSfHb38zS">
           <!-- 倍速选择菜单 -->
-          <div class="menu-popover-container">
-            <button class="ctrl-btn text-btn" id="btn-speed" title="倍速播放">1.0x</button>
-            <div class="popover-menu" id="speed-menu">
-              <div class="menu-item" data-speed="3.0">3.0x</div>
-              <div class="menu-item" data-speed="2.0">2.0x</div>
-              <div class="menu-item" data-speed="1.5">1.5x</div>
-              <div class="menu-item" data-speed="1.25">1.25x</div>
-              <div class="menu-item active" data-speed="1.0">1.0x</div>
-              <div class="menu-item" data-speed="0.75">0.75x</div>
-              <div class="menu-item" data-speed="0.5">0.5x</div>
+          <div class="menu-popover-container" data-page-node-id="o2RLODw7oH0lR2freDEUto">
+            <button class="ctrl-btn text-btn" id="btn-speed" title="倍速播放" data-page-node-id="U86BG1jQpiC6BAMGyiyFHI">1.0x</button>
+            <div class="popover-menu" id="speed-menu" data-page-node-id="EIOyT2QUXpOk9Efxn4wb4B">
+              <div class="menu-item" data-speed="3.0" data-page-node-id="G50noccpJ8GK0pMyX2SG2R">3.0x</div>
+              <div class="menu-item" data-speed="2.0" data-page-node-id="VjTAA5sFBfDpaAEB6J595h">2.0x</div>
+              <div class="menu-item" data-speed="1.5" data-page-node-id="DJvu9mmGbtvMQLYDyrB5h8">1.5x</div>
+              <div class="menu-item" data-speed="1.25" data-page-node-id="35pNbkVU3dFCNRE7SOSPzB">1.25x</div>
+              <div class="menu-item active" data-speed="1.0" data-page-node-id="T7jS1FlHEkefjKBYj4eUKa">1.0x</div>
+              <div class="menu-item" data-speed="0.75" data-page-node-id="RW3GUjEBz2KR4zVvW5fGxG">0.75x</div>
+              <div class="menu-item" data-speed="0.5" data-page-node-id="HAlA3lpW2xAMrjdoCpFyuB">0.5x</div>
             </div>
           </div>
 
           <!-- 画面比例控制 -->
-          <div class="menu-popover-container">
-            <button class="ctrl-btn text-btn" id="btn-aspect" title="画面比例">自动</button>
-            <div class="popover-menu" id="aspect-menu">
-              <div class="menu-item active" data-aspect="auto">自动比例</div>
-              <div class="menu-item" data-aspect="16-9">16 : 9</div>
-              <div class="menu-item" data-aspect="4-3">4 : 3</div>
-              <div class="menu-item" data-aspect="cover">拉伸铺满</div>
+          <div class="menu-popover-container" data-page-node-id="IjnuDzzlvBeT7y81Vl63GD">
+            <button class="ctrl-btn text-btn" id="btn-aspect" title="画面比例" data-page-node-id="p1Rk8OW3aIzhdUAbboEO0O">自动</button>
+            <div class="popover-menu" id="aspect-menu" data-page-node-id="WvuxCHVdqKmF1FP0H1Vvji">
+              <div class="menu-item active" data-aspect="auto" data-page-node-id="lIGbTPE9jThPiGF722fFf0">自动比例</div>
+              <div class="menu-item" data-aspect="16-9" data-page-node-id="GbkeGZjh6wXykSnnsFjMVY">16 : 9</div>
+              <div class="menu-item" data-aspect="4-3" data-page-node-id="mnwjfpWXjbQaKeC9fSKKn2">4 : 3</div>
+              <div class="menu-item" data-aspect="cover" data-page-node-id="cmWVgBa4SSUDmrjTYkTmu0">拉伸铺满</div>
             </div>
           </div>
 
           <!-- 外挂字幕控制 -->
-          <div class="menu-popover-container">
-            <button class="ctrl-btn text-btn" id="btn-subtitle" title="外挂字幕 (CC)">CC</button>
-            <div class="popover-menu" id="subtitle-menu">
-              <div class="menu-item" id="btn-load-sub">加载字幕文件...</div>
-              <div class="menu-item" id="btn-toggle-sub">隐藏字幕</div>
-              <div class="menu-item" id="btn-sub-size-up">字号 +</div>
-              <div class="menu-item" id="btn-sub-size-down">字号 -</div>
-              <div class="menu-item" id="btn-sub-offset-up">字幕延后 0.5s</div>
-              <div class="menu-item" id="btn-sub-offset-down">字幕提前 0.5s</div>
+          <div class="menu-popover-container" data-page-node-id="IV9pv6mQfLKkbdkCXxtZzz">
+            <button class="ctrl-btn text-btn" id="btn-subtitle" title="外挂字幕 (CC)" data-page-node-id="m2MbWjGIwfpd5ie3Nn2GOf">CC</button>
+            <div class="popover-menu" id="subtitle-menu" data-page-node-id="34PnenTfJ5oKCPrVNeUPG6">
+              <div class="menu-item" id="btn-load-sub" data-page-node-id="VLbaRMjiLe8CWt9fVhVrf2">加载字幕文件...</div>
+              <div class="menu-item" id="btn-toggle-sub" data-page-node-id="aLQzJ7HUPCS7FXm2ZCPRKp">隐藏字幕</div>
+              <div class="menu-item" id="btn-sub-size-up" data-page-node-id="UCug6qOaVCdcf4cnB6UtSA">字号 +</div>
+              <div class="menu-item" id="btn-sub-size-down" data-page-node-id="xaFJCZdujc7nOy20mEUlGn">字号 -</div>
+              <div class="menu-item" id="btn-sub-offset-up" data-page-node-id="hDmY4Rk250nUyEYWv2FK9S">字幕延后 0.5s</div>
+              <div class="menu-item" id="btn-sub-offset-down" data-page-node-id="51LXurqZd9CER1hH9CoFCT">字幕提前 0.5s</div>
             </div>
           </div>
 
-          <span class="ctrl-divider" aria-hidden="true"></span>
+          <span class="ctrl-divider" aria-hidden="true" data-page-node-id="TA8afepGYsHAZhWvdRTSVN"></span>
 
           <!-- 音量调控 -->
-          <div class="volume-container">
-            <button class="ctrl-btn" id="btn-volume" title="音量/静音">
-              <svg viewBox="0 0 24 24" id="icon-volume-state"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+          <div class="volume-container" data-page-node-id="UHp2PVt0QgPZcc7TnXiji9">
+            <button class="ctrl-btn" id="btn-volume" title="音量/静音" data-page-node-id="e8D3B4HLwMYgYsTiuATdYs">
+              <svg viewBox="0 0 24 24" id="icon-volume-state" data-page-node-id="HaHK9T6Q8AWReJs6z0EIBa"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" data-page-node-id="Gw2izQHIDU0FlowfCbDHh1"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07" data-page-node-id="rVL88PpF9rLW11wQ8kJlwB"/></svg>
             </button>
-            <div class="volume-slider-wrapper">
-              <input type="range" id="volume-range" min="0" max="2" step="0.05" value="1" title="音量 0%~200%">
+            <div class="volume-slider-wrapper" data-page-node-id="JgzkRWnYZgmraW4BiT3RQF">
+              <input type="range" id="volume-range" min="0" max="2" step="0.05" value="1" title="音量 0%~200%" data-page-node-id="BDf9ZxKejmXMBZfEXIHVRF">
             </div>
           </div>
 
-          <span class="ctrl-divider" aria-hidden="true"></span>
+          <span class="ctrl-divider" aria-hidden="true" data-page-node-id="MDFGWKybIUATZjWG9NLthC"></span>
 
           <!-- 外观主题切换（浅色 / 深色） -->
-          <button class="ctrl-btn" id="btn-appearance" title="切换到浅色外观" aria-label="切换外观主题">
-            <svg viewBox="0 0 24 24" id="icon-appearance-state">
-              <circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.77 1.77M17.33 17.33l1.77 1.77M4.9 19.1l1.77-1.77M17.33 6.67l1.77-1.77"/>
+          <button class="ctrl-btn" id="btn-appearance" title="切换到浅色外观" aria-label="切换外观主题" data-page-node-id="AgcsF9LNLNoh26HFFKBnyK">
+            <svg viewBox="0 0 24 24" id="icon-appearance-state" data-page-node-id="9bhE9jgamT4fGbNE6LVP7x">
+              <circle cx="12" cy="12" r="4.5" data-page-node-id="yPxrmdIOUUHHhbFEKc78rO"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.77 1.77M17.33 17.33l1.77 1.77M4.9 19.1l1.77-1.77M17.33 6.67l1.77-1.77" data-page-node-id="lp49T1GdUxXqU6JYs38979"/>
             </svg>
           </button>
 
           <!-- 播放模式控制菜单 -->
-          <div class="menu-popover-container">
-            <button class="ctrl-btn" id="btn-play-mode" title="播放模式">
-              <svg viewBox="0 0 24 24">
-                <g id="icon-playmode-state">
-                  <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
+          <div class="menu-popover-container" data-page-node-id="3SALLL1ueJoaXNhHYwY2Re">
+            <button class="ctrl-btn" id="btn-play-mode" title="播放模式" data-page-node-id="SY1CzoK0FvDdPKqLZniHpC">
+              <svg viewBox="0 0 24 24" data-page-node-id="7fViaVCOZsu0OjXM0RsBRH">
+                <g id="icon-playmode-state" data-page-node-id="KcIn3XKIDrqpy1lXLyioZQ">
+                  <polyline points="17 1 21 5 17 9" data-page-node-id="iLNfXKX0HI3ECAt6gAsAkT"/><path d="M3 11V9a4 4 0 0 1 4-4h14" data-page-node-id="P8shALXIm87IEuOHgrKbIW"/><polyline points="7 23 3 19 7 15" data-page-node-id="vTzyYhWj1vMicIo18gVWOn"/><path d="M21 13v2a4 4 0 0 1-4 4H3" data-page-node-id="7zfD9SHBeEoI2BrCumk6ul"/>
                 </g>
               </svg>
             </button>
-            <div class="popover-menu" id="play-mode-menu">
-              <div class="menu-item" data-mode="list-loop">循环播放</div>
-              <div class="menu-item" data-mode="random">随机播放</div>
-              <div class="menu-item" data-mode="single-loop">单个循环</div>
+            <div class="popover-menu" id="play-mode-menu" data-page-node-id="Rn3LC2EFC06GQ5apGvnVAP">
+              <div class="menu-item" data-mode="list-loop" data-page-node-id="Kb4lW93lw3KlYmNlMYC5M8">循环播放</div>
+              <div class="menu-item" data-mode="random" data-page-node-id="JZBRkMhbnZuIIpGokh5OMm">随机播放</div>
+              <div class="menu-item" data-mode="single-loop" data-page-node-id="4lr7mrrPrQYTELZ4bkqJcX">单个循环</div>
             </div>
           </div>
 
           <!-- 高清截图按键 -->
-          <button class="ctrl-btn" id="btn-screenshot" title="画面高清截图 (S)">
-            <svg viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+          <button class="ctrl-btn" id="btn-screenshot" title="画面高清截图 (S)" data-page-node-id="aqtYAKXXLI5Yd582EV0DZZ">
+            <svg viewBox="0 0 24 24" data-page-node-id="FS9L7FlULJ2yVGCv4oMkW7"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" data-page-node-id="12wRrz00QscodMC9qRzbtx"/><circle cx="12" cy="13" r="4" data-page-node-id="SCDJAuBMWs8Cbpbd0D7YIB"/></svg>
           </button>
 
           <!-- 顺时针旋转视频 90° -->
-          <button class="ctrl-btn" id="btn-rotate" title="顺时针旋转 90°">
-            <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          <button class="ctrl-btn" id="btn-rotate" title="顺时针旋转 90°" data-page-node-id="StzCRN5dpAAhxMKlf1nKUu">
+            <svg viewBox="0 0 24 24" data-page-node-id="8aeshtQcDVMDjyzxGdYosk"><polyline points="23 4 23 10 17 10" data-page-node-id="QuiXC4pE9HKYQla5QcuWPl"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" data-page-node-id="XqSYJ92frYRWItRTYh5H7B"/></svg>
           </button>
 
-          <span class="ctrl-divider" aria-hidden="true"></span>
+          <span class="ctrl-divider" aria-hidden="true" data-page-node-id="JyhSZAyWJtsi2kWIqgtBLb"></span>
 
           <!-- 全屏切换 -->
-          <button class="ctrl-btn" id="btn-fullscreen" title="全屏 (F11)">
-            <svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+          <button class="ctrl-btn" id="btn-fullscreen" title="全屏 (F11)" data-page-node-id="wPFQXDOc74NHSCBRGQV9YB">
+            <svg viewBox="0 0 24 24" data-page-node-id="OPK0OfrGjL01K1N6nXiJhW"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" data-page-node-id="t2YDJRkVt00L8DxjpeGSqB"/></svg>
           </button>
 
           <!-- 播放列表切换按钮 -->
-          <button class="ctrl-btn" id="btn-playlist" title="播放列表">
-            <svg viewBox="0 0 24 24"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+          <button class="ctrl-btn" id="btn-playlist" title="播放列表" data-page-node-id="6IySJHHkESBFtYU3CPRguZ">
+            <svg viewBox="0 0 24 24" data-page-node-id="jo1VGQEyelU8vb1jukJ2EN"><line x1="8" y1="6" x2="21" y2="6" data-page-node-id="EidhMruLiDUK9d24xFYsLi"/><line x1="8" y1="12" x2="21" y2="12" data-page-node-id="N52LzJJ1slk0OOCQsRh6Cn"/><line x1="8" y1="18" x2="21" y2="18" data-page-node-id="OYDvPpbTSWCEDNCjFMLQCY"/><line x1="3" y1="6" x2="3.01" y2="6" data-page-node-id="2XIOiDgGX1bSXidPMX4iBo"/><line x1="3" y1="12" x2="3.01" y2="12" data-page-node-id="InnxCFSM74WRBQOy6LsFt5"/><line x1="3" y1="18" x2="3.01" y2="18" data-page-node-id="1KfuIGuDsqBdCW5Mjxxydh"/></svg>
           </button>
         </div>
       </div>

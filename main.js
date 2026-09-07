@@ -23,6 +23,7 @@ function showMainWindow() {
 }
 
 const VIDEO_EXTS = require('./shared-video-exts');
+const SUBTITLE_EXTS = require('./shared-subtitle-exts'); // 字幕扩展名单一来源（与渲染端共享）
 const videoExtensions = new Set(VIDEO_EXTS.all.map(ext => '.' + ext));
 
 // 解析命令行/"打开方式"传入的媒体文件路径（支持一次多个文件，按序返回绝对路径数组）。
@@ -364,12 +365,12 @@ ipcMain.handle('file:findCover', (event, filePath) => {
   return null;
 });
 
-// 媒体扩展名下发（单一事实来源 shared-video-exts.js）：
+// 媒体扩展名下发（单一事实来源 shared-video-exts.js / shared-subtitle-exts.js）：
 // preload 处于沙箱无法 require 本地模块，渲染进程经此一次性获取与主进程完全一致的数据。
 // 冷启动/运行的传入文件统一走 did-finish-load 的 'open-file' 事件，无第二通道。
 ipcMain.handle('app:getVideoExtensions', (event) => {
   if (!isTrustedSender(event)) return null;
-  return VIDEO_EXTS;
+  return { ...VIDEO_EXTS, subtitle: SUBTITLE_EXTS };
 });
 
 // 打开本地视频文件对话框（支持多选）
@@ -399,7 +400,7 @@ ipcMain.handle('dialog:openSubtitle', async (event) => {
     title: '选择外挂字幕文件',
     properties: ['openFile'],
     filters: [
-      { name: '字幕文件', extensions: ['srt', 'vtt', 'ass', 'ssa'] },
+      { name: '字幕文件', extensions: [...SUBTITLE_EXTS] },
       { name: '所有文件', extensions: ['*'] }
     ]
   });
@@ -472,8 +473,8 @@ ipcMain.handle('dialog:openFolder', async (event) => {
   }
 });
 
-// 读取本地文本文件（字幕），限制扩展名避免任意文件读取
-const ALLOWED_SUBTITLE_EXTS = new Set(['.srt', '.vtt', '.ass', '.ssa']);
+// 读取本地文本文件（字幕），限制扩展名避免任意文件读取（白名单单一来源 shared-subtitle-exts.js）
+const ALLOWED_SUBTITLE_EXTS = new Set(SUBTITLE_EXTS.map(ext => '.' + ext));
 const MAX_SUBTITLE_BYTES = 10 * 1024 * 1024; // 10MB，防止误选超大文件撑爆内存
 
 // 字幕编码嗅探：BOM 识别 → UTF-8 严格解码 → GBK 回退。

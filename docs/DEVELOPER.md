@@ -9,22 +9,25 @@
 
 ```
 BBPlayer/
-├── main.js               # Electron 主进程：多窗口工厂/状态记忆、IPC 信任面、文件对话框、目录扫描
-├── preload.js            # 预加载脚本：contextBridge 暴露 electronAPI（渲染进程唯一系统入口）
-├── renderer.js           # 渲染层全部业务逻辑（约 2300 行，单文件策略，每窗口一份独立实例）
-├── index.html            # 界面结构 + 全部内联 CSS（"安静玻璃"低占用视觉 + 音乐播放效果层，单文件免额外请求）
-├── shared-video-exts.js  # 媒体扩展名单一事实来源：结构化 { video, audio, all }
-├── verify-exts.js        # 扩展名一致性对账脚本（shared-video-exts ↔ package.json fileAssociations）
-├── run-test.bat          # 源码方式启动测试（自动检测 Node/Electron 环境）
-├── build/                # 打包图标（ico/png，用作窗口与安装包图标）
-└── package.json          # 元数据 + electron-builder 配置
+├── main.js                 # Electron 主进程：多窗口工厂/状态记忆、IPC 信任面、文件对话框、目录扫描
+├── preload.js              # 预加载脚本：contextBridge 暴露 electronAPI（渲染进程唯一系统入口）
+├── renderer.js             # 渲染层全部业务逻辑（约 2300 行，单文件策略，每窗口一份独立实例）
+├── index.html              # 界面结构 + 全部内联 CSS（"安静玻璃"低占用视觉 + 彩虹品牌体系 + 音乐播放效果层）
+├── shared-video-exts.js    # 视频/音频扩展名单一事实来源：结构化 { video, audio, all }
+├── shared-subtitle-exts.js # 字幕扩展名单一事实来源：['srt','vtt','ass','ssa']（v1.6.1 新增）
+├── verify-exts.js          # 扩展名一致性对账脚本（shared-video-exts ↔ package.json fileAssociations）
+├── run-test.bat            # 源码方式启动测试（自动检测 Node/Electron 环境）
+├── build/                  # 打包图标（彩虹渐变播放三角 ico/png，v1.6.1 重制）
+└── package.json            # 元数据 + electron-builder 配置
 ```
 
 **依赖纪律**：运行时零 npm 依赖；仅 `electron` 与 `electron-builder` 两个 devDependencies。
-扩展名单一事实来源为 `shared-video-exts.js`（结构化 `video/audio/all`）：主进程直接 require，
-preload（沙箱无法 require 本地模块）与渲染进程经 IPC `app:getVideoExtensions` 获取同一份数据。
-`package.json` 的 `build.fileAssociations` 为 electron-builder 独立配置，二者一致性由
-`node verify-exts.js`（对账脚本，随仓库保留）自动校验。
+扩展名单一事实来源有两份（v1.6.1 起）：`shared-video-exts.js`（结构化 `video/audio/all`）与
+`shared-subtitle-exts.js`（`['srt','vtt','ass','ssa']`）。主进程直接 require 两者；
+preload（沙箱无法 require 本地模块）与渲染进程经 IPC `app:getVideoExtensions` 获取同一份数据
+（返回值含 `subtitle` 字段）。此前字幕白名单在主/渲染进程共 4 处硬编码，已全部收敛。
+`package.json` 的 `build.fileAssociations` 为 electron-builder 独立配置，与媒体扩展名的一致性由
+`npm run verify`（对账脚本）自动校验。
 
 ---
 
@@ -60,14 +63,20 @@ preload（沙箱无法 require 本地模块）与渲染进程经 IPC `app:getVid
 
 ### 2. 窗口拖拽（视频画面 + 标题栏）与单击播放手势
 
-同一套 pointer 手势模式用于两个区域（v1.6.0 起标题栏与视频画面统一）：
+视频画面与标题栏共用同一套拖拽实现 `bindWindowDrag(el, callbacks)`（v1.6.1 起为单一函数，
+此前两处约 45 行近重复实现已合并）：
 
-- **`video` 元素**：`pointerdown` 起手记录屏幕坐标，`pointermove` 位移 >4px 判定为拖窗口
-  （经 IPC `window-move` 让主进程移动），否则在 `pointerup` 后延时 250ms 触发播放/暂停
-  （延时用于给双击全屏让路，双击会取消该计时器）；
-- **`#titlebar`（v1.6.0 新增）**：与视频同一套 pointer + rAF 合帧拖拽（排除 `.window-controls`
-  按键区），替代被移除的 `app-region: drag`；新增**双击标题栏空白区 = 最大化/还原**（对齐原生
-  标题栏习惯，双击处理已排除窗口按键区）。所有监听器带 `blur` 兜底清理，防拖拽中失焦泄漏。
+- **统一契约**：左键 `pointerdown` 起手记录屏幕坐标，位移 >4px 确认为拖拽
+  （经 IPC `window-move` 让主进程移动，rAF 合帧每帧至多同步一次）；
+  `pointerup`/`pointercancel`/窗口 `blur`（Alt-Tab）均兜底清理监听器，防累积；
+- **回调注入差异**：`onPointerDown(e)` 返回 false 可否决本次按下（标题栏用它排除
+  `.window-controls` 按键区）；`onDragStart()` 拖拽确认瞬间回调；`onPointerUp(dragged)`
+  左键释放回调（dragged=是否发生了拖拽）；
+- **视频画面**：`onPointerDown` 清掉上一次单击挂起的 250ms 延时计时器；
+  `onPointerUp(false)`（纯单击）时延时 250ms 触发播放/暂停——延时用于给双击全屏让路
+  （双击会取消该计时器）；
+- **标题栏**（v1.6.0 起 JS 拖拽，替代被移除的 `app-region: drag`）：纯拖拽无附加回调；
+  双击标题栏空白区 = 最大化/还原（对齐原生标题栏习惯，双击处理已排除窗口按键区）。
 
 ### 3. 拖放文件
 
@@ -235,8 +244,8 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
    进度条 / 字幕 / 音乐背景等 30+ 语义变量）。所有颜色必须走变量，禁止硬编码。
 2. **强调色三级**：`--accent-neon`（进度条等线性元素渐变端点）、`--accent-text`（强调文字，
    深色亮青 `#00f2fe` / 浅色深青蓝 `#0284c7`，纯青在浅底对比度不足）、
-   `--accent-solid`（v1.6.0 新增，播放键唯一实心填充：深色 `#00f2fe` 配深字、
-   浅色 `#0284c7` 配白字）。
+   `--rainbow-gradient`（v1.6.1 起播放键/进度条品牌渐变，由 `--rw-1..7` 色标变量合成；
+   v1.6.0 的 `--accent-solid`/`--accent-on-solid` 纯色强调变量已随彩虹化移除）。
 3. **切换**：`renderer.js` 的 `applyAppearance(isLight)` 设置 `document.documentElement.dataset.theme`；
    外观按钮 `#btn-appearance`（循环播放键左侧）图标太阳（深色）/ 月亮（浅色）提示目标状态。
 4. **持久化**：`bb_player_settings.appearance`（'light' / 'dark'），启动恢复。
@@ -260,12 +269,15 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 与底部功能栏共用同一套 `:root` 深浅色板——切换主题时顶部同步变色；不允许在顶栏写死
 主题相关颜色（仅品牌 Logo 渐变与关闭键悬停红 `#e81123` 为固定色）。
 
-**品牌图标**：`build/icon.png`（512px 高清）与 `build/icon.ico`（16/24/32/48/64/128/256
-八尺寸 PNG 条目）为"彩色播放键"：青→蓝→紫三段渐变 + 左缘玻璃高光带 + 半透明深蓝描边 +
-全透明底。素材由一次性 PowerShell + System.Drawing 抗锯齿绘制生成（脚本未入库，产物已固化；
-如需重绘可参照几何参数：三角形 (0.20,0.15)/(0.20,0.85)/(0.80,0.50) 归一坐标，渐变 #00E5FF→#3B9DF6→#8B5CF6）。
-图标出口覆盖：应用窗口/任务栏（icon.png → BrowserWindow.icon）与打包 EXE
-资源（icon.ico → electron-builder win.icon）、文件关联（默认跟随应用图标）。
+**品牌图标**（v1.6.1 彩虹化重制）：`build/icon.png`（512px）与 `build/icon.ico`
+（16/24/32/48/64/128/256 七尺寸）为"彩虹渐变播放三角"：横向彩虹（红→橙→黄→绿→青→蓝→紫，
+渐变按三角包围盒归一化保证完整色带落在形状内）+ 半透明深蓝描边 + 全透明底。
+素材由一次性 Python/Pillow 脚本 4x 超采样抗锯齿绘制（脚本在 `.workbuddy/tmp/gen_rainbow_icon.py`，
+未入库；几何参数：512 基准三角 (95,70)/(95,440)/(420,255)，描边 13px）。
+图标出口覆盖：应用窗口/任务栏（icon.png → BrowserWindow.icon）、打包 EXE 资源
+（icon.ico → electron-builder win.icon）、文件关联（v1.6.1 起 fileAssociations 显式指定
+`"icon": "build/icon.ico"`，不再依赖默认值）。Windows 图标有缓存，替换后如资源管理器
+未刷新可重启资源管理器或清图标缓存。
 
 ---
 
@@ -286,8 +298,9 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 5. **职能分组**：右栏以 `.ctrl-divider`（1px hairline）分为
    [倍速·比例·CC] | [音量] | [外观·模式·截图·旋转] | [全屏·列表] 四组；所有功能保持可见
    （用户否决了溢出菜单方案）。
-6. **播放键唯一实心**：`#btn-play` 40px 圆角方形（`--r-md`），纯色 `--accent-solid`
-   填充 + `--accent-on-solid` 反色图标，无渐变无发光；hover 仅 scale(1.05)。
+6. **播放键品牌强调**（v1.6.1 彩虹化）：`#btn-play` 40px 圆角方形（`--r-md`），
+   **底色透明**，播放三角/暂停双竖条图标本身呈彩虹渐变（`fill="url(#rainbowPlay)"`），
+   hover 仅 scale(1.05) + 幽灵浅底（详见第 18 节）。
 7. **窗口控制按键贴角**：44×42 矩形热区经负 margin 延伸到窗口右上角（VS Code/Chrome
    式原生无边框样式），无圆角无边框；关闭键 hover 纯红 `#e81123`。
 8. **菜单**：左对齐 + `::before` 指示点标记选中项（所有条目占位保证文字对齐），
@@ -317,7 +330,93 @@ CSS `animation-play-state: paused` 让均衡器随播放状态起停（暂停时
 
 ---
 
+### 18. 彩虹品牌体系与进度条裁剪渲染（v1.6.1 新增）
+
+**彩虹色标单一来源**：`:root` 定义 `--rw-1..7` 七个色标变量（红 `#ff3b4e` / 橙 `#ff8a00` /
+黄 `#ffd400` / 绿 `#2ecc5b` / 青 `#00c2ff` / 蓝 `#2e6bff` / 紫 `#a24bff`），四处品牌渐变
+共用这一组值，改品牌色只需改这里：
+
+- `--rainbow-gradient`（CSS 渐变：进度条填充、封面兜底区等，7 停靠点全用）；
+- 三处 SVG 渐变 `#rainbowPlay`（播放键）/ `#logoGlow`（标题栏 Logo）/ `#emptyNeon`
+  （空状态 Logo）：stop 经 `.rw-*` 类引用变量（`stop-color` 是可 CSS 化的展示属性），
+  5 停靠点取 1/3/4/5/7 号色。
+
+**播放键彩虹图标的关键约束**：`updatePlayPauseUI()` 会整体重写 `#icon-play-state` 的
+innerHTML（切换播放/暂停两态图形），渐变 `<defs>` 若放在该 svg 内部会被抹掉——因此 defs
+放在 `#btn-play` 内独立的 `.svg-defs` svg（0 尺寸，内联样式覆盖 `.ctrl-btn svg` 的尺寸规则），
+跨 svg 以 `url(#rainbowPlay)` 同文档引用。两套图形（三角/双竖条）的 innerHTML 都必须自带
+`fill="url(#rainbowPlay)"`（展示属性优先于继承的 `fill: currentColor`）。渐变用
+`gradientUnits="userSpaceOnUse" x1=0 → x2=24`，让暂停双竖条的颜色在 24×24 视口上连续过渡。
+
+**进度条彩虹渐变（clip-path 恒定色带）**：若渐变直接设在随播放变宽的 `#progress-fill` 上，
+色带会随进度被压缩变形。实现为填充层恒为容器全宽彩虹，由 `--progress` 变量经
+`clip-path: inset(0 calc(100% - var(--progress, 0%)) 0 0 round 4px)` 裁剪显示区域；
+JS 在三处写 `progressContainer.style.setProperty('--progress', …)`
+（timeupdate / loadedmetadata 重置 / handleSeek）。两个联动约束：
+
+- **进度把手必须在填充层外**：把手原是填充层子元素，clip-path 会把它一起裁掉；
+  现为容器直接子元素，`left: var(--progress)` 定位；
+- 自定义属性会继承，写在 `#progress-container` 上，填充层与把手各自消费。
+
+**窗口控制按键**：图标默认 `--text-primary`（与 BBPLAYER 字样同色，深色主题即纯白，
+解决灰图标看不清），悬停底色 `--win-hover` 换为深色高亮块（深色主题 `rgba(30,41,59,0.85)`，
+比暗背景亮、比视频画面暗，双向可见；浅色主题深青蓝 0.14）；关闭键悬停红不变。
+
+**正确性修复**：播放列表点击委托原用 `e.target.classList.contains('remove-btn')` 判断，
+点在按钮内部 SVG 图形上时 target 是 svg/path（无该 class），会穿透成"播放该条目"——
+改用 `closest('.remove-btn')`/`closest('.new-win-btn')` + `itemDiv.contains()` 双重校验。
+`failedPlaylistKeys` 在 `removePlaylistItem` 时删除对应 key、`resetPlayerToEmpty` 时
+`clear()`，修复"删除失败条目后重新添加同名文件仍被拉黑跳过"的问题。键盘 → 键 seek 的
+时长校验统一为 `hasSeekableDuration()`（Infinity 不再误通过）。
+
+---
+
 ## 三、版本变更明细
+
+### v1.6.1——彩虹品牌主题 + 播放栏彩虹化 + 双轴全量审查修复与瘦身
+
+#### A. 彩虹品牌主题（用户需求）
+
+1. **应用图标彩虹化重制**：`build/icon.png`（512px）与 `build/icon.ico`（7 尺寸）重绘为
+   彩虹渐变播放三角（保留深色描边 + 透明底构图；Pillow 4x 超采样，渐变按三角包围盒归一化）；
+   覆盖窗口/任务栏/打包 EXE/文件关联（fileAssociations 显式指定 icon）；
+2. **界面品牌元素同步彩虹化**：标题栏 BBPLAYER Logo、空状态大 Logo、音乐封面兜底区；
+3. **色标单一来源**：`--rw-1..7` 变量统一 4 处渐变（CSS + 3 处 SVG），消除 22 处硬编码 hex；
+4. **窗口控制按键提亮**：图标灰色 → `--text-primary`（与软件名同色），悬停深色高亮块；
+   清理死变量 `--win-hover-border`。
+
+#### B. 播放功能栏彩虹化（用户需求）
+
+1. **播放/暂停键**：底色透明，图标本身呈彩虹渐变（播放三角 / 暂停双竖条两态）；
+   渐变 defs 独立于被 JS 重写的图标 svg（详见关键机制第 18 节），图标 20→24px；
+2. **进度条**：恒定全宽彩虹 + `clip-path` 裁剪驱动（`--progress` 变量，3 处写入点），
+   色带位置不随进度压缩变形；进度把手移出裁剪层改 `left: var(--progress)` 定位。
+
+#### C. 正确性修复（双轴全量审查：正确性轴 + 过度设计轴并行）
+
+1. **播放列表点击穿透**：点在"移除/新窗口"按钮内部 SVG 图形上时事件穿透成"播放该条目"
+   → 改 `closest()` 命中 + `itemDiv.contains()` 双重校验；
+2. **失败条目永久拉黑**：删除/清空播放列表不清理 `failedPlaylistKeys`，重新添加同名文件
+   仍被自动跳过 → 删除条目时移除对应 key，清空播放器时全量清空；
+3. **键盘 → 键 seek 校验口径**：`!isNaN(duration)` 对 Infinity 误通过 → 统一
+   `hasSeekableDuration()`。
+
+#### D. 工程瘦身（过度设计轴，净约 -50 行）
+
+1. **拖拽实现合并**：视频画面与标题栏两套近重复 pointer 拖拽（各 ~45 行）→ 单一
+   `bindWindowDrag(el, callbacks)`（回调注入差异行为：250ms 单击延时、按键区否决）；
+2. **字幕扩展名单一来源**：主/渲染进程 4 处硬编码 → 新增 `shared-subtitle-exts.js`，
+   主进程经 `app:getVideoExtensions` 下发 `subtitle` 字段（**打包清单已同步加入**）；
+3. **死代码清理**：`progressFill` 常量（--progress 方案后零引用）、
+   `--accent-solid`/`--accent-on-solid`（播放键彩虹化后无引用）、`--win-hover-border`；
+4. **对账脚本挂载**：`npm run verify`（verify-exts.js 此前只能手动执行）。
+
+#### E. 验证
+
+6 个 JS `node --check` 全过；`npm run verify` 对账通过；grep 确认清理项零残留；
+Electron 真实启动冒烟测试零报错。
+
+---
 
 ### v1.6.0——"安静玻璃"低占用视觉重做 + 标题栏拖拽重构 + 正确性修复
 
@@ -673,6 +772,9 @@ CSS `animation-play-state: paused` 让均衡器随播放状态起停（暂停时
 ```bat
 :: 源码方式运行测试（自动装环境，支持把视频文件拖到 bat 图标上直接播）
 run-test.bat
+
+:: 扩展名一致性对账（shared-video-exts / shared-subtitle-exts ↔ package.json）
+npm run verify
 
 :: 打包 Windows 安装版 + 便携版（输出到 release-dist/）
 npm install

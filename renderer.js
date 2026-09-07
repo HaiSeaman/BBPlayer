@@ -1,9 +1,9 @@
 // 本软件仅运行于 Electron，preload 未注入即属致命错误
 if (!window.electronAPI) throw new Error('BBPlayer 必须在 Electron 环境中运行');
 
-// 媒体扩展名（单一事实来源 shared-video-exts.js，经主进程 IPC 一次性获取）。
+// 媒体扩展名（单一事实来源 shared-video-exts.js / shared-subtitle-exts.js，经主进程 IPC 一次性获取）。
 // 异步获取足够安全：所有消费点（拖拽过滤、音频判断）都发生在用户交互之后。
-let mediaExtensions = { video: [], audio: [], all: [] };
+let mediaExtensions = { video: [], audio: [], all: [], subtitle: [] };
 window.electronAPI.getVideoExtensions().then(list => {
   if (list && Array.isArray(list.all)) mediaExtensions = list;
 }).catch(() => {});
@@ -75,9 +75,8 @@ const rotateBtn = document.getElementById('btn-rotate');
 const fullscreenBtn = document.getElementById('btn-fullscreen');
 const btnAppearance = document.getElementById('btn-appearance');
 
-// 进度条与时间
+// 进度条与时间（进度显示由 --progress CSS 变量驱动，见 updateProgressUI 相关调用点）
 const progressContainer = document.getElementById('progress-container');
-const progressFill = document.getElementById('progress-fill');
 const hoverTimeBubble = document.getElementById('progress-tooltip');
 const currentTimeEl = document.getElementById('current-time');
 const durationEl = document.getElementById('duration-time');
@@ -669,10 +668,10 @@ async function loadSubtitleFromPath(filePath, expectedVideoPath) {
   return false;
 }
 
-// 检查同名本地字幕（依次尝试 .srt / .vtt / .ass / .ssa，与主进程白名单一致）
+// 检查同名本地字幕（依次尝试 .srt / .vtt / .ass / .ssa，扩展名来自 IPC 下发的单一来源）
 async function checkAndAutoLoadSubtitles(basePath) {
   const videoKey = currentFilePath; // 发起时的视频路径（令牌）
-  for (const ext of ['.srt', '.vtt', '.ass', '.ssa']) {
+  for (const ext of mediaExtensions.subtitle.map(e => '.' + e)) {
     try {
       const ok = await loadSubtitleFromPath(basePath + ext, videoKey);
       if (ok) {
@@ -858,7 +857,7 @@ window.addEventListener('drop', (e) => {
 
   const subtitleFiles = files.filter(f => {
     const ext = f.name.split('.').pop().toLowerCase();
-    return ['srt', 'vtt', 'ass', 'ssa'].includes(ext);
+    return mediaExtensions.subtitle.includes(ext); // 白名单单一来源（IPC 下发），与主进程一致
   });
 
   // 处理拖入的视频（同时拖了视频+字幕时也照常加入列表）
@@ -980,10 +979,14 @@ if (playlistItemsContainer) {
     if (!itemDiv || !itemDiv.dataset.index) return;
     const index = Number(itemDiv.dataset.index);
     if (!Number.isInteger(index) || index < 0 || index >= playlist.length) return;
-    if (e.target.classList.contains('remove-btn')) {
+    // 用 closest 命中按钮：点在按钮内部 SVG 图形上时 target 不带按钮 class，
+    // 直接 classList.contains 会穿透成"播放该条目"（修复图标点击失效 BUG）
+    const removeBtnHit = e.target.closest('.remove-btn');
+    const newWinBtnHit = e.target.closest('.new-win-btn');
+    if (removeBtnHit && itemDiv.contains(removeBtnHit)) {
       e.stopPropagation();
       removePlaylistItem(index);
-    } else if (e.target.classList.contains('new-win-btn')) {
+    } else if (newWinBtnHit && itemDiv.contains(newWinBtnHit)) {
       e.stopPropagation();
       const item = playlist[index];
       if (item && item.key) {
@@ -1098,6 +1101,7 @@ function resetPlayerToEmpty() {
   currentSubtitleData = [];
   pendingResumeTime = 0;
   lastSavedProgressSec = -1;
+  failedPlaylistKeys.clear(); // 播放器清空即解除全部"播放失败"拉黑（列表已不存在，标记失去意义）
   revokeCurrentBlobUrl();
   if (customSubtitle) customSubtitle.style.display = 'none';
   if (resumeToast) resumeToast.style.display = 'none';
@@ -1159,7 +1163,10 @@ function playPlaylistItem(index) {
 
 function removePlaylistItem(index) {
   clearAutoNextTimer();
+  const removed = playlist[index];
   playlist.splice(index, 1);
+  // 同步解除该条目的"播放失败"拉黑标记：删掉失败项再重新添加同名文件时应可正常播放
+  if (removed) failedPlaylistKeys.delete(removed.key);
   if (currentPlaylistIndex === index) {
     if (playlist.length > 0) {
       const nextIndex = index < playlist.length ? index : playlist.length - 1;
@@ -1253,12 +1260,14 @@ function updatePlayPauseUI(isPlaying) {
   if (playPauseBtn) {
     const playIcon = playPauseBtn.querySelector('#icon-play-state');
     if (playIcon) {
+      // 图标本身呈彩虹渐变（fill 引用按钮内 defs svg 的 #rainbowPlay，userSpaceOnUse
+      // 让暂停双竖条的颜色在 24x24 视口上连续过渡）
       if (isPlaying) {
         // 转换为暂停图标 (双连杆)
-        playIcon.innerHTML = `<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>`;
+        playIcon.innerHTML = `<rect x="6" y="4" width="4" height="16" rx="1" fill="url(#rainbowPlay)"/><rect x="14" y="4" width="4" height="16" rx="1" fill="url(#rainbowPlay)"/>`;
       } else {
         // 转换为播放图标 (圆角三角)
-        playIcon.innerHTML = `<polygon points="5 3 19 12 5 21 5 3"/>`;
+        playIcon.innerHTML = `<polygon points="5 3 19 12 5 21 5 3" fill="url(#rainbowPlay)"/>`;
       }
     }
   }
@@ -1281,91 +1290,87 @@ function togglePlayPause() {
 
 if (playPauseBtn) playPauseBtn.addEventListener('click', togglePlayPause);
 
-// 完美兼顾画面按住拖拽窗口与单击播放/暂停
-if (video) {
-  let isDraggingWindow = false;
-  let startX = 0;
-  let startY = 0;
-  let initialWinX = 0;
-  let initialWinY = 0;
-
-  video.addEventListener('pointerdown', (e) => {
+// === 统一窗口拖拽绑定（视频画面与标题栏共用同一套实现） ===
+// 契约：左键按下 → 位移超过 4px 确认为拖拽（区分单击）→ rAF 合帧调用 moveWindow；
+// pointerup/pointercancel/窗口失焦（Alt-Tab）均兜底清理监听器，防止累积。
+// 回调：onPointerDown(e) 返回 false 可否决本次按下（如点击在标题栏按键区）；
+// onDragStart() 拖拽确认瞬间回调；onPointerUp(dragged) 左键释放回调（dragged=是否发生了拖拽）。
+function bindWindowDrag(el, { onPointerDown, onDragStart, onPointerUp } = {}) {
+  if (!el) return;
+  el.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return; // 仅左键响应
-    // 全屏禁拖由主进程 window-move 兜底（win.isFullScreen）；
-    // 本进程是原生全屏（无 ElementFullscreen），document.fullscreenElement 恒为 null，勿在此误设防
+    if (onPointerDown && onPointerDown(e) === false) return;
 
-    if (clickTimer) {
-      clearTimeout(clickTimer);
-      clickTimer = null;
-    }
-    isDraggingWindow = false;
-    startX = e.screenX;
-    startY = e.screenY;
-
-    // 记录拖拽初始瞬间的屏幕与窗口坐标
-    initialWinX = window.screenX;
-    initialWinY = window.screenY;
-
-    // rAF 合帧：拖拽每秒可达 60-120 次 pointermove，窗口位置只需每帧同步一次
-    let dragRafPending = false;
+    const startX = e.screenX;
+    const startY = e.screenY;
+    const initialWinX = window.screenX;
+    const initialWinY = window.screenY;
+    let dragging = false;
+    let rafPending = false;
     let dragTarget = { x: 0, y: 0 };
-    const onPointerMove = (moveEv) => {
-      const deltaX = moveEv.screenX - startX;
-      const deltaY = moveEv.screenY - startY;
 
-      // 位移阈值判断（超过 4px 视作拖动窗口，而不是单击）
-      if (!isDraggingWindow && (Math.abs(deltaX) > 4 || Math.abs(deltaY) > 4)) {
-        isDraggingWindow = true;
-        if (clickTimer) {
-          clearTimeout(clickTimer);
-          clickTimer = null;
-        }
+    const onMove = (moveEv) => {
+      const dx = moveEv.screenX - startX;
+      const dy = moveEv.screenY - startY;
+      if (!dragging && (Math.abs(dx) > 4 || Math.abs(dy) > 4)) {
+        dragging = true;
+        if (onDragStart) onDragStart();
       }
-
-      if (isDraggingWindow) {
-        dragTarget = { x: initialWinX + deltaX, y: initialWinY + deltaY };
-        if (!dragRafPending) {
-          dragRafPending = true;
+      if (dragging) {
+        dragTarget = { x: initialWinX + dx, y: initialWinY + dy };
+        if (!rafPending) {
+          rafPending = true;
           requestAnimationFrame(() => {
-            dragRafPending = false;
+            rafPending = false;
             window.electronAPI.moveWindow(dragTarget);
           });
         }
       }
     };
 
-    const cleanupPointerListeners = () => {
-      window.removeEventListener('pointermove', onPointerMove);
-      window.removeEventListener('pointerup', onPointerUp);
-      window.removeEventListener('pointercancel', onPointerCancel);
-      window.removeEventListener('blur', onPointerCancel);
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      window.removeEventListener('blur', onCancel);
     };
 
-    const onPointerUp = (upEv) => {
-      cleanupPointerListeners();
+    const onUp = () => {
+      cleanup();
+      if (onPointerUp) onPointerUp(dragging);
+    };
 
-      if (!isDraggingWindow) {
-        // 说明是纯粹的左键单击，触发播放/暂停
-        if (clickTimer) {
-          clearTimeout(clickTimer);
-          clickTimer = null;
-        }
+    const onCancel = () => {
+      dragging = false;
+      cleanup();
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    window.addEventListener('blur', onCancel);
+  });
+}
+
+// 完美兼顾画面按住拖拽窗口与单击播放/暂停
+if (video) {
+  bindWindowDrag(video, {
+    onPointerDown: () => {
+      // 清掉上一次单击挂起的 250ms 延时（双击全屏前会先到一次 pointerdown）
+      if (clickTimer) {
+        clearTimeout(clickTimer);
+        clickTimer = null;
+      }
+    },
+    onPointerUp: (dragged) => {
+      // 纯粹的左键单击（未拖拽）：延时 250ms 触发播放/暂停，给双击全屏留出取消窗口
+      if (!dragged) {
         clickTimer = setTimeout(() => {
           clickTimer = null;
           togglePlayPause();
         }, 250);
       }
-    };
-
-    const onPointerCancel = () => {
-      cleanupPointerListeners();
-      isDraggingWindow = false;
-    };
-
-    window.addEventListener('pointermove', onPointerMove);
-    window.addEventListener('pointerup', onPointerUp);
-    window.addEventListener('pointercancel', onPointerCancel);
-    window.addEventListener('blur', onPointerCancel); // 与 seek 路径一致：按住拖拽时失焦（Alt-Tab）兜底清理，防止监听器累积
+    }
   });
 }
 
@@ -1405,7 +1410,7 @@ video.addEventListener('timeupdate', () => {
   const total = video.duration;
   const percent = (current / total) * 100;
 
-  if (progressFill) progressFill.style.width = `${percent}%`;
+  if (progressContainer) progressContainer.style.setProperty('--progress', `${percent}%`);
   if (currentTimeEl) currentTimeEl.textContent = formatTime(current);
   if (durationEl) durationEl.textContent = formatTime(total);
 
@@ -1418,7 +1423,7 @@ video.addEventListener('loadedmetadata', () => {
   failedPlaylistKeys.clear(); // 成功加载，清空失败记录
   // 换源后 Chromium 会将倍速重置为 1.0，元数据就绪时重新应用用户设置
   video.playbackRate = currentSpeed;
-  if (progressFill) progressFill.style.width = '0%';
+  if (progressContainer) progressContainer.style.setProperty('--progress', '0%');
   if (currentTimeEl) currentTimeEl.textContent = formatTime(0);
   if (durationEl) durationEl.textContent = formatTime(video.duration);
 
@@ -1512,7 +1517,7 @@ if (progressContainer) {
     const rect = progressContainer.getBoundingClientRect();
     const pos = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const targetTime = pos * video.duration;
-    if (progressFill) progressFill.style.width = `${pos * 100}%`;
+    if (progressContainer) progressContainer.style.setProperty('--progress', `${pos * 100}%`);
     if (currentTimeEl) currentTimeEl.textContent = formatTime(targetTime);
     video.currentTime = targetTime;
   };
@@ -2117,7 +2122,7 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'ArrowRight':
       e.preventDefault();
-      if (video.src && video.duration > 0 && !isNaN(video.duration)) {
+      if (video.src && hasSeekableDuration()) { // Infinity/NaN/0 时长一律不可 seek（与全局口径一致）
         video.currentTime = Math.min(Math.max(0, video.duration - 0.2), video.currentTime + 5);
       }
       break;
@@ -2293,56 +2298,14 @@ if (videoContainer) {
   });
 }
 
-// === 标题栏鼠标拖拽移动窗口（替代 app-region:drag）===
-// OS 级拖拽区会吞掉鼠标事件（Windows 下视为 HTCAPTION），导致顶部热区唤出、
-// 悬停保持显示、停放不收起全部失效；改为与视频画面同一套 pointer + rAF 拖拽后，
-// 标题栏上的 mousemove/click/dblclick 全程可达，显隐契约行为确定化。
+// === 标题栏鼠标拖拽移动窗口 ===
+// 与视频画面共用 bindWindowDrag 同一套拖拽实现（4px 阈值 + rAF 合帧 + 失焦兜底清理）。
+// 背景：OS 级拖拽区（app-region:drag）会吞掉鼠标事件（Windows 下视为 HTCAPTION），
+// 导致顶部热区唤出、悬停保持显示、停放不收起全部失效；改用 JS 拖拽后行为确定化。
 if (titleBar) {
-  let tbDragging = false;
-  let tbStartX = 0;
-  let tbStartY = 0;
-  let tbWinX = 0;
-  let tbWinY = 0;
-
-  titleBar.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return; // 仅左键
-    if (e.target.closest('.window-controls')) return; // 窗口按键区不拖（按键自带 click 行为）
-    tbDragging = false;
-    tbStartX = e.screenX;
-    tbStartY = e.screenY;
-    tbWinX = window.screenX;
-    tbWinY = window.screenY;
-
-    let rafPending = false;
-    let dragTarget = { x: 0, y: 0 };
-    const onMove = (me) => {
-      const dx = me.screenX - tbStartX;
-      const dy = me.screenY - tbStartY;
-      if (!tbDragging && (Math.abs(dx) > 4 || Math.abs(dy) > 4)) tbDragging = true; // 4px 阈值区分拖拽与点击
-      if (tbDragging) {
-        dragTarget = { x: tbWinX + dx, y: tbWinY + dy };
-        if (!rafPending) {
-          rafPending = true;
-          requestAnimationFrame(() => {
-            rafPending = false;
-            window.electronAPI.moveWindow(dragTarget);
-          });
-        }
-      }
-    };
-    const cleanup = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onCancel);
-      window.removeEventListener('blur', onCancel);
-    };
-    const onUp = () => cleanup();
-    const onCancel = () => { tbDragging = false; cleanup(); };
-
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointercancel', onCancel);
-    window.addEventListener('blur', onCancel); // 拖拽中失焦（Alt-Tab）兜底清理，防监听器累积
+  bindWindowDrag(titleBar, {
+    // 窗口按键区（最小化/最大化/关闭）不拖拽：按键自带 click 行为
+    onPointerDown: (e) => !e.target.closest('.window-controls')
   });
 
   // 双击标题栏空白区 = 最大化/还原（对齐原生标题栏使用习惯）
