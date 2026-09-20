@@ -6,7 +6,7 @@
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-1.6.1-ff3b4e?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.7.0-ff3b4e?style=for-the-badge)
 
 **纯粹、轻量、高颜值的 Windows 无边框本地多媒体播放器**
 
@@ -141,7 +141,7 @@ BBPlayer/
 
 **设计原则**
 - **运行时零依赖**——仅 `electron` 与 `electron-builder` 两个 devDependencies。
-- **单文件渲染层**——每个窗口一份 `renderer.js`（约 2300 行），状态完全隔离。
+- **单文件渲染层**——每个窗口一份 `renderer.js`（约 2400 行），状态完全隔离。
 - **加固的 IPC**——所有处理器经受信窗口集合校验发送方（`isTrustedSender`）；页面导航、`window.open` 与非顶层 frame 一律封死。
 - **扩展名单一来源**——媒体/字幕扩展名列表收敛于共享模块，两进程经 IPC 共享，由 `npm run verify` 自动对账。
 

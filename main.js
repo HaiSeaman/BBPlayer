@@ -2,6 +2,16 @@ const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
+// === 主进程兜底：未捕获异常不再让整个播放器直接崩溃退出 ===
+// 播放器是长驻的单窗口应用，任何一处 IPC 回调意外抛错都不该带走用户正在看的视频；
+// 记录后继续运行，比 Node 默认的"直接退出进程"更符合本地播放器的取舍。
+process.on('uncaughtException', (err) => {
+  console.error('[BBPlayer] 主进程未捕获异常（已拦截，进程继续）:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[BBPlayer] 主进程未处理的 Promise 拒绝（已拦截）:', reason);
+});
+
 // === 性能与内存优化标志设置（后台节流由 webPreferences.backgroundThrottling:false 统一控制） ===
 app.commandLine.appendSwitch('disable-background-networking');
 app.commandLine.appendSwitch('disable-breakpad');
@@ -112,7 +122,10 @@ function createPlayerWindow(options = {}) {
     backgroundColor: '#08090C',
     title: 'BBPlayer',
     icon: path.join(__dirname, 'build/icon.png'),
-    show: false, // 准备好之后再显示，避免闪烁
+    // 立即显示窗口：先把窗口"壳"亮出来（底色是与页面背景一致的 #08090C，不会闪白），内容随后绘制。
+    // 若像旧版那样等 ready-to-show 才显示，用户在 Electron 整个启动期间看不到任何东西，
+    // 体感就是"点了没反应、卡很久"；Electron 官方文档对复杂应用正是推荐此做法。
+    show: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -299,9 +312,13 @@ ipcMain.handle('window:isFullScreen', (event) => {
   return win ? win.isFullScreen() : false;
 });
 
+// 同时在世的播放器窗口上限：防止渲染进程被注入后循环开窗耗尽系统资源
+const MAX_PLAYER_WINDOWS = 16;
+
 // 在独立新窗口播放指定视频（多视频同时播放的核心入口）
 ipcMain.on('window:openInNewWindow', (event, filePath) => {
   if (!isTrustedSender(event)) return;
+  if (playerWindows.size >= MAX_PLAYER_WINDOWS) return;
   if (typeof filePath !== 'string' || !filePath) return;
   const abs = path.resolve(filePath);
   const ext = path.extname(abs).toLowerCase();
@@ -334,9 +351,12 @@ ipcMain.handle('path-to-url', (event, filePath) => {
 const COVER_FILENAMES = ['cover.jpg', 'cover.jpeg', 'cover.png', 'cover.webp', 'folder.jpg', 'folder.png', 'front.jpg', 'front.png'];
 const MAX_COVER_BYTES = 8 * 1024 * 1024; // 8MB：超过则不走 base64（防止特大图撑爆 IPC 载荷）
 const COVER_MIME = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' };
-ipcMain.handle('file:findCover', (event, filePath) => {
+ipcMain.handle('file:findCover', async (event, filePath) => {
   if (!isTrustedSender(event)) return null;
   if (typeof filePath !== 'string' || !filePath) return null;
+  // 入参必须是受支持的媒体文件（与其它文件类 IPC 同一套白名单）：
+  // 否则本接口会退化成"传任意图片路径即可读回其 base64"，成为越权读图通道
+  if (!videoExtensions.has(path.extname(filePath).toLowerCase())) return null;
   try {
     const abs = path.resolve(filePath);
     const dir = path.dirname(abs);
@@ -344,20 +364,25 @@ ipcMain.handle('file:findCover', (event, filePath) => {
     const candidates = COVER_FILENAMES.concat([base + '.jpg', base + '.jpeg', base + '.png', base + '.webp']);
     for (const name of candidates) {
       const p = path.join(dir, name);
-      if (fs.existsSync(p) && fs.statSync(p).isFile()) {
-        const mime = COVER_MIME[path.extname(p).toLowerCase()];
-        if (mime) {
-          try {
-            const stat = fs.statSync(p);
-            if (stat.size > 0 && stat.size <= MAX_COVER_BYTES) {
-              return `data:${mime};base64,${fs.readFileSync(p).toString('base64')}`;
-            }
-          } catch (err) {
-            console.warn('封面转 data URL 失败，回退 file://:', p, err);
-          }
-        }
-        return pathToFileURL(p).href;
+      let stat;
+      try {
+        // 全部改异步：同步 stat/read 会阻塞主进程，多窗口下等于卡住所有窗口
+        stat = await fs.promises.stat(p);
+      } catch (err) {
+        continue; // 不存在或不可读，继续尝试下一个候选名
       }
+      if (!stat.isFile()) continue;
+      const mime = COVER_MIME[path.extname(p).toLowerCase()];
+      if (mime && stat.size > 0 && stat.size <= MAX_COVER_BYTES) {
+        try {
+          const buf = await fs.promises.readFile(p);
+          return `data:${mime};base64,${buf.toString('base64')}`;
+        } catch (err) {
+          console.warn('封面转 data URL 失败，回退 file://:', p, err);
+        }
+      }
+      // 超大图 / 未知图片类型：直接给 file:// URL，显示不受影响（仅主色采样走兜底背景）
+      return pathToFileURL(p).href;
     }
   } catch (err) {
     console.warn('查找封面失败:', filePath, err);
@@ -538,11 +563,14 @@ ipcMain.handle('file:decodeSubtitle', (event, payload) => {
   return decodeSubtitleBuffer(new Uint8Array(payload));
 });
 
+// 截图载荷上限：4K 原图 PNG 通常远小于此，超出即视为异常/恶意载荷，拒绝写盘
+const MAX_SCREENSHOT_BYTES = 64 * 1024 * 1024;
 // 导出保存高清截图到本地文件（渲染进程固定以 ArrayBuffer 载荷传输，避免大图 base64 膨胀）
 ipcMain.handle('dialog:saveScreenshot', async (event, payload) => {
   const win = windowOf(event);
   if (!win || !isTrustedSender(event)) return false;
   if (!payload || typeof payload !== 'object' || !(payload.data instanceof ArrayBuffer)) return false;
+  if (payload.data.byteLength === 0 || payload.data.byteLength > MAX_SCREENSHOT_BYTES) return false;
   const { data, defaultName } = payload;
   // 默认文件名校验：仅接受纯文件名（去路径分隔符），防止恶意名字带目录穿越进默认保存路径
   let safeName = 'BBPlayer_Screenshot.png';
@@ -627,7 +655,8 @@ ipcMain.on('window-move', (event, payload) => {
   if (!win) return;
   if (!payload || typeof payload !== 'object') return;
   const { x, y } = payload;
-  if (typeof x !== 'number' || typeof y !== 'number') return;
+  // isFinite 校验不可省：NaN 的 typeof 同样是 'number'，漏掉会把 NaN 喂给 setPosition
+  if (typeof x !== 'number' || typeof y !== 'number' || !isFinite(x) || !isFinite(y)) return;
   if (win.isFullScreen()) return; // 全屏状态下禁止拖动窗口
 
   const bounds = win.getBounds();

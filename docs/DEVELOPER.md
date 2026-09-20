@@ -11,7 +11,7 @@
 BBPlayer/
 ├── main.js                 # Electron 主进程：多窗口工厂/状态记忆、IPC 信任面、文件对话框、目录扫描
 ├── preload.js              # 预加载脚本：contextBridge 暴露 electronAPI（渲染进程唯一系统入口）
-├── renderer.js             # 渲染层全部业务逻辑（约 2300 行，单文件策略，每窗口一份独立实例）
+├── renderer.js             # 渲染层全部业务逻辑（约 2400 行，单文件策略，每窗口一份独立实例）
 ├── index.html              # 界面结构 + 全部内联 CSS（"安静玻璃"低占用视觉 + 彩虹品牌体系 + 音乐播放效果层）
 ├── shared-video-exts.js    # 视频/音频扩展名单一事实来源：结构化 { video, audio, all }
 ├── shared-subtitle-exts.js # 字幕扩展名单一事实来源：['srt','vtt','ass','ssa']（v1.6.1 新增）
@@ -98,6 +98,12 @@ preload（沙箱无法 require 本地模块）与渲染进程经 IPC `app:getVid
 UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法字节即抛错）→ GBK 回退 → latin1 兜底。
 覆盖中文环境最常见的 ANSI(GBK) 老字幕。主进程读取有 10MB 上限（`MAX_SUBTITLE_BYTES`）。
 
+**v1.7.0 修复**：ASS 格式判定原为区分大小写的 `/^\s*Dialogue:/m`，而逐行解析却用
+`toLowerCase()` 判断，两者口径不一致 → 小写 `dialogue:` 的字幕文件会被误当 SRT 解析、
+最终一条字幕都读不出来；判定已改为大小写不敏感。
+另外，字幕文案缓存 `lastRenderedSubText` 原先只在"无字幕可显示"时才清空，换片时未重置 →
+新片首句若与上一部末句同文，会被判为"无需重绘"而漏显；现已在换片与清空播放器时一并重置。
+
 ### 5. IPC 安全面（v1.4.4 起为多窗口信任面）
 
 所有主进程 IPC 处理器经 `isTrustedSender()` 校验发送方：
@@ -107,6 +113,16 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
   （`BrowserWindow.fromWebContents(event.sender)`）定位。
 - 字幕读取有扩展名白名单 + 10MB 上限；`will-navigate` 与 `window-open` 已封死；
 - 新窗口播放入口 `window:openInNewWindow` 校验扩展名白名单 + `fs.existsSync`。
+
+**v1.7.0 加固**：
+- `file:findCover` 补扩展名白名单（入参必须是受支持的媒体文件）——此前入参不校验时，
+  该接口等价于"传任意图片路径即可读回其 base64"，是一条越权读图通道；同时把
+  `existsSync/statSync/readFileSync` 全部改为 `fs.promises`，避免同步磁盘读阻塞主进程；
+- `dialog:saveScreenshot` 新增载荷上限 `MAX_SCREENSHOT_BYTES`（64MB），拒绝异常/恶意超大载荷；
+- 新增 `MAX_PLAYER_WINDOWS`（16）限制同时在世的播放器窗口数，防止注入后循环开窗耗尽资源；
+- 主进程新增 `process.on('uncaughtException'/'unhandledRejection')` 兜底：任何一处 IPC 回调
+  意外抛错不再让整个播放器退出，记录后继续运行（本地播放器的取舍）；
+- CSP 补 `object-src 'none'` 与 `base-uri 'none'`。
 
 ### 6. 持久化键（localStorage）
 
@@ -164,6 +180,14 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 - **自愈与降级**：每次应用音量时检测 `audioCtx.state === 'suspended'` 并自动 `resume()`；若环境不支持 Web Audio API 则无缝降级回原生 `0~100%` 控制；
 - **UI 增益警示**：音量超过 100%（进入超额放大区）时，滑块自动变为霓虹橙色（`#volume-range.boost`），提醒用户当前处于高增益状态。
 
+**v1.7.0 变更——管线改为首帧后惰性建立**：`initAudioPipeline()` 涉及 `new AudioContext()` 与
+`createMediaElementSource()`，需要初始化音频输出设备与音频线程，属于不可忽略的同步开销。
+它不再在 `restoreSettings` 中同步调用（那会把首帧、进而窗口内容一起往后推），改为首帧之后经
+`requestIdleCallback`（退回双 `requestAnimationFrame`）惰性建立；建成后立刻重跑
+`applyMasterVolume()`，让存档中 >100% 的增益档位立即生效。建管线之前音量只能走原生 0~100%，
+因此这段窗口期内会出现"UI 显示 150%、实际 100%"的短暂过渡。
+`enterMusicMode()` 另有一次保底初始化，确保频谱所需的 `analyserNode` 必然存在。
+
 ### 11. 多窗口架构（v1.4.4 新增）
 
 **目标**：多个视频在各自独立窗口同时播放（类似 PotPlayer/VLC 多开），每个窗口都是完整播放器。
@@ -173,6 +197,7 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 1. **窗口工厂 `createPlayerWindow({ isMain, initialFile })`**：主窗口与新窗口弹窗共用同一套
    无边框/沉浸/比例锁/最小化自动暂停逻辑。`isMain` 决定是否记忆窗口状态（仅主窗口持久化
    bounds 到 `window-state.json`）；`initialFile` 让弹窗在 `did-finish-load` 后自动播放指定文件。
+   **v1.7.0 起窗口以 `show: true` 创建**（立即显示，不再等 `ready-to-show`；详见第 19 节）。
 2. **信任面 `playerWindows: Set`**：所有播放器窗口（含弹窗）加入该集合，`closed` 时移除；
    IPC 处理器一律通过 `windowOf(event)` 定位**发起窗口自身**（最小化/最大化/关闭/全屏/
    对话框/截图/窗口自适应缩放/移动），各窗口互不干扰。
@@ -210,6 +235,13 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
    封面加载成功后 24×24 canvas 采样主色，55% 压暗生成背景渐变 + `--cover-glow` 光晕
    （Ambient 风格，每首歌背景色不同）；canvas 受限时 try/catch 保留默认深色背景。
 5. **令牌防串台**：`musicCoverToken` 令牌 + 闭包捕获，快速切歌时旧封面加载结果一律丢弃。
+
+**v1.7.0 变更**：
+- **误判自愈**：极少数容器在 `loadedmetadata` 阶段仍拿不到画面尺寸，会被误判为纯音频，
+  界面被音乐效果层盖住（字幕/截图按钮被隐藏）且此后没有纠正机会 →
+  新增 `loadeddata` 复检，一旦发现有画面立即 `exitMusicMode()`；
+- **频谱采样缓冲复用**：`drawSpectrumFrame` 原先每帧 `new Uint8Array(frequencyBinCount)`，
+  改为复用 `spectrumBins`（仅在桶数变化时重建），消除音乐播放期间每秒约 60 次的短命分配。
 
 ### 13. 窗口关闭与退出策略（v1.5.0 曾为托盘常驻，现已改为关闭即退出）
 
@@ -371,7 +403,123 @@ JS 在三处写 `progressContainer.style.setProperty('--progress', …)`
 
 ---
 
+### 19. 启动路径与首帧预算（v1.7.0 新增）
+
+**目标**：把"从双击到看见窗口"的等待压到最短。用户感知的"打开慢"，主要来自**窗口迟迟不出现**，
+而不是播放本身慢。
+
+**关键约束**：`renderer.js` 是 `index.html` 底部同步执行的经典脚本（非 module、无 defer）。
+脚本求值期间做的**任何同步工作都会挡在首帧之前**，进而推迟窗口内容的绘制。
+因此"启动关键路径"上只允许留必要且廉价的工作。
+
+**三条预算纪律**：
+
+1. **窗口立即显示**（`main.js`）：`BrowserWindow` 以 `show: true` 创建，窗口"壳"在构造瞬间即出现；
+   底色 `backgroundColor: '#08090C'` 与页面背景一致，所以不会闪白。
+   旧版等 `ready-to-show`（首帧绘制完成）才 `show()`，用户在 Electron 整个启动期间看不到任何东西，
+   体感就是"点了没反应、卡很久"。Electron 官方文档对复杂应用正是推荐"立即显示 + 设好 backgroundColor"。
+2. **音频管线移出关键路径**（`renderer.js`）：`initAudioPipeline()`（`new AudioContext()` +
+   `createMediaElementSource`）需要初始化音频输出设备与音频线程，不再于 `restoreSettings` 中同步调用；
+   改为首帧之后经 `requestIdleCallback`（退回双 `requestAnimationFrame`）惰性建立，
+   建成后立刻重跑 `applyMasterVolume()` 补齐存档中 >100% 的增益档位。
+   `enterMusicMode()` 另有一次保底初始化，确保频谱所需的 `analyserNode` 必然存在。
+3. **强制布局延后**：`applyAspectMode()` 会读 `videoContainer.clientWidth/clientHeight`（强制同步布局），
+   同样延后到首帧后的 `requestAnimationFrame` 执行。`index.html` 中比例按钮文案与菜单选中态
+   本来就是"自动"这一默认状态，因此延后看不出任何差别。
+
+**由此引入的时序陷阱（维护必读）**：`restoreSettings` 在**脚本求值阶段**就同步执行。
+凡是被它（直接或间接）调用的函数所引用的顶层 `const`，**都必须声明在它之前**，
+否则触发暂时性死区（TDZ）抛 `ReferenceError`——而该异常会被 `restoreSettings` 自身的
+`try/catch` 吞掉（仅打一行 console 日志），导致其**后面所有设置恢复静默失效**。
+v1.7.0 修复的真实案例就是 `SUN_ICON` / `MOON_ICON`（见版本明细 B 节）。
+新增"会被 restoreSettings 间接引用"的常量时，一律放到 `restoreSettings` 之前，或改为函数内惰性取值。
+
+**临时诊断手段（v1.7.0 发布版已移除，可按需重建）**：定位启动耗时分布时，曾在主/渲染两进程
+植入 `Date.now()` 墙钟打点，经 IPC `startup-report` 汇总写入 `userData/startup-log.txt`，
+记录 Electron 二进制加载、窗口构造、loadFile、did-finish-load、ready-to-show、窗口显示
+以及渲染端各阶段耗时。复测时按本节纪律重新植入即可；
+`release-dist/measure-with-tracing/` 保留了一份带打点的可运行版本可供对照。
+
+---
+
 ## 三、版本变更明细
+
+### v1.7.0——启动体感优化 + 严重时序 BUG 修复 + 安全加固 + 性能收敛
+
+#### A. 启动与体感优化（用户需求：缩短打开等待）
+
+1. **窗口立即显示**：`BrowserWindow` 改为 `show: true` 创建（底色与页面背景一致的 `#08090C`，
+   不会闪白），窗口"壳"在构造瞬间出现；不再等 `ready-to-show` 才显示——旧版在整个 Electron
+   启动期间用户看不到任何东西，这才是"打开慢"的体感主因。详见关键机制第 19 节；
+2. **音频增益管线移出启动关键路径**：`initAudioPipeline()`（`new AudioContext()` +
+   `createMediaElementSource`，需初始化音频输出设备与音频线程）不再于 `restoreSettings` 中同步调用，
+   改为首帧后 `requestIdleCallback`（退回双 rAF）惰性建立，建成后重跑 `applyMasterVolume()`
+   补齐 >100% 增益档位；`enterMusicMode()` 另有保底初始化；
+3. **强制同步布局延后**：`applyAspectMode()`（内部读 `clientWidth/clientHeight`）延后到首帧后执行；
+4. **主进程不再被同步磁盘读阻塞**：`file:findCover` 的 `existsSync/statSync/readFileSync`
+   全部改 `fs.promises`（多窗口下同步读等于卡住所有窗口）。
+
+#### B. 严重 BUG 修复：启动设置恢复链路静默中断（Critical）
+
+**根因**：`restoreSettings` 在脚本求值阶段同步执行，其中调用的 `applyAppearance()` 引用了
+在文件**后面**才用 `const` 声明的 `SUN_ICON` / `MOON_ICON`，触发暂时性死区（TDZ）
+抛 `ReferenceError`；异常被 `restoreSettings` 自身的 `try/catch` 吞掉（仅打一行 console 日志）。
+
+**后果**（抛错点之后的恢复代码**全部不执行**）：音量恢复失效（存档的 200% 每次重启退回 100%）、
+字幕字号未应用、字幕开关文案与倍速按钮文案未同步、倍速菜单选中态未同步。
+
+**修复**：把两个图标常量上移到 `restoreSettings` 之前声明，并在原位置留注释说明原因。
+**回归测试**：无界面冒烟测试在修复前 7 项失败、修复后全部通过（红-绿已验证）。
+
+#### C. 正确性修复（全量审查）
+
+1. **双击已打开过的视频毫无反应**：`addFilesToPlaylist` 去重后返回 0，调用方无任何后续动作，
+   而"双击关联文件"正是主路径 → 新增 `playExistingFile()`，去重命中时切到该条目播放；
+   文件对话框选中的文件全为列表已有项时同样处理（`openFolderAndAdd` 也补了提示，不再静默）；
+2. **清空观看历史后又冒回来**：5 秒定点打卡会把正在播放的条目写回 →
+   新增 `historySuppressedKey`，清空历史时记录当前路径并暂停写入，切换视频后自动解除；
+3. **源解析失败导致列表状态错位**：`toFileUrl` 返回空串（文件被删/扩展名不支持）时提前 return，
+   但 `currentPlaylistIndex` 与高亮已被改写 → 新增 `playlistIndexBeforeSwitch`，失败时回滚并提示文件名；
+4. **纯音频误判无法自愈**：极少数容器在 `loadedmetadata` 阶段拿不到画面尺寸会被误判为纯音频，
+   界面被音乐效果层盖住且永不纠正 → 新增 `loadeddata` 复检，发现有画面立即 `exitMusicMode()`；
+5. **换片后首句字幕漏显**：字幕文案缓存 `lastRenderedSubText` 未随换片清空，新片首句若与
+   上一部末句同文会被判为"无需重绘" → 在换片与清空播放器时一并重置；
+6. **小写 `dialogue:` 的 ASS 字幕一条都读不出**：格式判定 `/^\s*Dialogue:/m` 区分大小写，
+   而逐行解析用 `toLowerCase()` 判断，两者口径不一致 → 判定改为 `/^\s*Dialogue:/im`；
+7. **窗口拖动坐标 NaN 未过滤**：`typeof NaN === 'number'`，漏掉 `isFinite` 会把 NaN 喂给
+   `setPosition` → 补 `isFinite` 校验（与其它坐标入口口径一致）。
+
+#### D. 安全加固
+
+1. **`file:findCover` 越权读图**：入参不校验类型时等价于"传任意图片路径即可读回其 base64"
+   → 增加与其它文件类 IPC 一致的媒体扩展名白名单；
+2. **截图 IPC 载荷无上限** → 新增 `MAX_SCREENSHOT_BYTES`（64MB）；
+3. **新窗口数量无上限**（注入后可循环开窗耗尽资源）→ 新增 `MAX_PLAYER_WINDOWS`（16）；
+4. **主进程无进程级异常兜底**：任何一处 IPC 回调抛错都会让整个播放器退出
+   → 新增 `process.on('uncaughtException'/'unhandledRejection')`，记录后继续运行；
+5. **CSP 补全**：新增 `object-src 'none'` 与 `base-uri 'none'`。
+
+#### E. 性能与内存
+
+1. **频谱采样缓冲复用**：`drawSpectrumFrame` 原先每帧 `new Uint8Array(frequencyBinCount)`，
+   改为复用 `spectrumBins`（仅在桶数变化时重建），消除音乐播放期间每秒约 60 次的短命分配。
+
+#### F. 验证
+
+- `node --check` 语法门禁 6 个文件全过；`npm run verify` 扩展名对账通过；
+- **无界面冒烟测试**（Node + DOM 桩，真实执行 renderer.js 顶层脚本）：35 项断言全过；
+  同一测试跑在修复前代码上 7 项失败，证明测试确有分辨力（红-绿验证）；
+- 打包产物校验：逐项确认修复已进入 `app.asar`，且 `SUN_ICON` 声明时序正确。
+
+#### 遗留事项（评估后未改，附理由）
+
+- **播放列表全量重建**：仅 500 条大列表有感，而"轻量高亮路径"是第 17 节明确依赖的设计，
+  重写风险大于收益；
+- **频谱渐变每帧重建**：需改离屏色带重写绘制，且无法在无界面环境目视验证渲染效果；
+- **多窗口 localStorage 互相覆盖**：真实存在，根治需改为主进程集中持久化（架构级改动）；
+- 进度条 hover 取 rect、5 秒打卡全量读写、截图画布内存峰值：量级可忽略或属功能取舍。
+
+---
 
 ### v1.6.1——彩虹品牌主题 + 播放栏彩虹化 + 双轴全量审查修复与瘦身
 

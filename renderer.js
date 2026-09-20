@@ -11,7 +11,10 @@ window.electronAPI.getVideoExtensions().then(list => {
 // === 监听外部/命令行双击打开的文件（冷启动与运行中打开均经此事件下发） ===
 window.electronAPI.onOpenFile((filePath) => {
   if (filePath) {
-    addFilesToPlaylist([filePath]);
+    // 该文件已在列表中时，addFilesToPlaylist 会因去重而不新增任何条目（返回 0）。
+    // 此时必须显式切到那一条，否则"双击已打开过的视频"毫无反应，用户会以为软件卡死——
+    // 而这恰好是文件关联双击的主路径。
+    if (addFilesToPlaylist([filePath]) === 0) playExistingFile(filePath);
   }
 });
 
@@ -109,6 +112,7 @@ const addFolderBtn = document.getElementById('btn-add-folder');
 // === 全局播放列表状态 ===
 let playlist = []; // 存储 { target, name, key }
 let currentPlaylistIndex = -1;
+let playlistIndexBeforeSwitch = -1; // 最近一次切换前的播放索引（源解析失败时用于回滚）
 let playlistView = 'list'; // 'list' | 'history'
 
 // === 全局状态 ===
@@ -136,6 +140,7 @@ let isMusicMode = false;        // 当前是否处于"纯音频音乐播放效�
 let musicAnimFrame = null;      // 频谱动画 requestAnimationFrame 句柄
 let musicCoverToken = 0;        // 封面异步加载令牌：换歌后旧封面结果作废
 let spectrumCtx = null;         // 频谱画布 2D 上下文缓存（getContext 每帧重复调用纯属浪费）
+let spectrumBins = null;        // 频谱采样缓冲复用（每帧 new 一个 Uint8Array 纯属给 GC 添堵）
 
 // 判断是否为音频扩展名（用于跳字幕查找等同步分支）
 function isAudioExt(p) {
@@ -238,7 +243,10 @@ function drawSpectrumFrame() {
   const H = musicSpectrumCanvas.height;
   if (!W || !H) { musicAnimFrame = null; return; }
 
-  const bins = new Uint8Array(analyserNode.frequencyBinCount);
+  // 采样缓冲复用：仅在桶数变化（管线重建）时重新分配，避免每帧都产生一个新数组交给 GC
+  const binCount = analyserNode.frequencyBinCount;
+  if (!spectrumBins || spectrumBins.length !== binCount) spectrumBins = new Uint8Array(binCount);
+  const bins = spectrumBins;
   analyserNode.getByteFrequencyData(bins);
 
   const barCount = 32;
@@ -300,6 +308,9 @@ function applyCoverGlow(imgEl) {
 // 切换进入音乐模式：显示效果层、铺设画布、隐藏音频无意义的按钮、异步加载封面
 async function enterMusicMode(filePath, displayName) {
   isMusicMode = true;
+  // 保底：频谱依赖 analyserNode（由音频增益管线创建）。正常路径下首帧后已惰性建好，
+  // 这里再确认一次，避免"管线尚未建立 → 频谱画不出来且不会自动重试"的死角。
+  if (!audioPipelineReady && initAudioPipeline()) applyMasterVolume();
   if (musicVisualizer) {
     musicVisualizer.style.display = 'flex';
     setupSpectrumCanvas();
@@ -470,9 +481,19 @@ function persistSettings() {
   }
 }
 
+// === 外观切换图标（必须声明在 restoreSettings 之前）===
+// restoreSettings 在脚本求值阶段就同步执行并调用 applyAppearance()，而 applyAppearance 要读这两个常量。
+// const 存在"暂时性死区"（TDZ）：若把它们留在文件后面的外观章节里声明，这里会抛 ReferenceError，
+// 而异常会被 restoreSettings 的 try/catch 吞掉，导致其后**所有**设置恢复
+// （音量、字幕字号、倍速按钮文案、菜单选中态）静默失效——用户设的音量每次重启都退回 100%。
+const SUN_ICON = '<circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.77 1.77M17.33 17.33l1.77 1.77M4.9 19.1l1.77-1.77M17.33 6.67l1.77-1.77"/>';
+const MOON_ICON = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+
 (function restoreSettings() {
   try {
-    initAudioPipeline(); // 先初始化增益管线，让恢复的音量走统一“数字功放”管道
+    // 音频增益管线刻意不在这里同步建立：new AudioContext() 需要初始化音频输出设备与音频线程，
+    // 而本文件是 body 末尾的同步脚本，任何同步耗时都会把首帧（进而窗口内容）一起往后推。
+    // 改为首帧之后惰性建立（见下方 scheduleAudioPipelineInit），建好后立刻重跑音量应用补齐增益。
     const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
     // 音量范围 0~200%：旧存档只有 0~1，直接兼容；非法值或损坏数据钳制回安全范围
     if (typeof s.volume === 'number' && isFinite(s.volume)) masterVolume = Math.max(0, Math.min(2, s.volume));
@@ -507,6 +528,18 @@ function persistSettings() {
     console.error('恢复设置失败:', e);
   }
 })();
+
+// 首帧之后再建立音频增益管线（浏览器空闲回调优先，退回双 rAF），避免 AudioContext 挡住首帧。
+// initAudioPipeline 本身幂等（同一个 video 的音源只允许绑定一次）；建立成功后重跑 applyMasterVolume，
+// 让恢复出来的 >100% 增益档位立即生效（建管线之前音量只能走原生 0~100%）。
+function scheduleAudioPipelineInit() {
+  const run = () => {
+    if (initAudioPipeline()) applyMasterVolume();
+  };
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 1500 });
+  else requestAnimationFrame(() => requestAnimationFrame(run));
+}
+scheduleAudioPipelineInit();
 
 // 全局保存创出的 Blob URL，方便垃圾回收释放
 let currentBlobUrl = null;
@@ -572,7 +605,11 @@ async function loadAndPlayVideo(filePathOrFile) {
   if (seq !== loadSequence) return;
 
   if (!targetSrc) {
-    showToast('无法解析媒体源');
+    // 源解析失败（文件已被删除 / 扩展名不受支持等）：本次切换其实没有真正发生，
+    // 把列表索引与高亮回滚到切换前的条目，避免"高亮指着 A、实际还在播 B"的错位状态
+    currentPlaylistIndex = playlistIndexBeforeSwitch;
+    renderPlaylist();
+    showToast(`无法解析媒体源：${fileName}`);
     return;
   }
 
@@ -582,11 +619,13 @@ async function loadAndPlayVideo(filePathOrFile) {
   }
 
   currentFilePath = fullPath;
+  historySuppressedKey = null; // 换了片子，历史记录恢复常态
   if (videoTitleEl) videoTitleEl.textContent = fileName;
 
   // 重置字幕状态（新视频不沿用上一部的字幕）
   currentSubtitleData = [];
   if (customSubtitle) customSubtitle.style.display = 'none';
+  lastRenderedSubText = null; // 清空缓存文案，否则新片首句若与上一部末句同文会被判为"无需重绘"而漏显
 
   // 重置续播状态（新视频不沿用上一部的续播提示）
   pendingResumeTime = 0;
@@ -703,10 +742,14 @@ function checkHistoryResume(pathKey) {
   }
 }
 
+// 用户刚清空观看历史后记录"当前正在播的路径"：否则 5 秒定时打卡会立刻把它写回去，"清空"变成假成功
+let historySuppressedKey = null;
+
 // 自动打卡记录播放进度（暂停或进度未变时跳过，避免无谓的解析/排序/写盘）
 let lastSavedProgressSec = -1;
 function saveCurrentProgress() {
   if (!currentFilePath || !hasRealPath) return;
+  if (historySuppressedKey === currentFilePath) return;
   if (video.paused || !video.duration || video.currentTime < 3) return;
   const sec = Math.floor(video.currentTime);
   if (sec === lastSavedProgressSec) return;
@@ -723,7 +766,8 @@ if (openFileBtn) {
     e.stopPropagation();
     window.electronAPI.openFileDialog().then(files => {
       if (files && files.length > 0) {
-        addFilesToPlaylist(files);
+        // 用户明确"选择文件打开"：若选中的都已在列表中（返回 0），直接切过去播放（与双击行为一致）
+        if (addFilesToPlaylist(files) === 0) playExistingFile(files[0]);
       }
     }).catch(err => {
       console.error('打开文件对话框失败:', err);
@@ -744,6 +788,8 @@ async function openFolderAndAdd() {
     const added = addFilesToPlaylist(files);
     if (added > 0) {
       showToast(`已添加文件夹中的 ${added} 个视频${truncated ? '（文件夹较大，超出上限的部分未载入）' : ''}`);
+    } else {
+      showToast('所选视频都已在播放列表中'); // 全被去重时不能静默无反应
     }
   } catch (err) {
     console.error('打开文件夹失败:', err);
@@ -913,6 +959,13 @@ function addFilesToPlaylist(fileList) {
     }
   }
   return newItems.length;
+}
+
+// 去重命中（文件已在列表中）时，把该条目切为当前播放项。
+// 供"双击关联文件 / 通过对话框选择文件打开"这类明确的打开意图使用：用户点了必须有反应。
+function playExistingFile(key) {
+  const index = playlist.findIndex(item => item.key === key);
+  if (index >= 0) playPlaylistItem(index);
 }
 
 function renderPlaylist() {
@@ -1104,6 +1157,7 @@ function resetPlayerToEmpty() {
   failedPlaylistKeys.clear(); // 播放器清空即解除全部"播放失败"拉黑（列表已不存在，标记失去意义）
   revokeCurrentBlobUrl();
   if (customSubtitle) customSubtitle.style.display = 'none';
+  lastRenderedSubText = null; // 清空缓存文案：否则换片后首句若与上一部末句同文会被判为"无需重绘"而漏显
   if (resumeToast) resumeToast.style.display = 'none';
   video.src = '';
   video.load();
@@ -1120,6 +1174,7 @@ if (playlistClearBtn) {
     if (playlistView === 'history') {
       try {
         localStorage.removeItem(HISTORY_KEY);
+        historySuppressedKey = currentFilePath || null; // 正在播的这条不再被定时打卡写回
         renderHistoryView();
         showToast('观看历史已清空');
       } catch (err) {
@@ -1149,6 +1204,7 @@ function playPlaylistItem(index) {
   clearAutoNextTimer();
   if (index < 0 || index >= playlist.length) return;
   const prevIndex = currentPlaylistIndex;
+  playlistIndexBeforeSwitch = prevIndex;
   currentPlaylistIndex = index;
   // 列表 DOM 与数据同步时仅移动高亮条目，避免整列表重建（不同步则退回全量渲染）
   const items = playlistItemsContainer ? playlistItemsContainer.children : [];
@@ -1446,6 +1502,13 @@ video.addEventListener('loadedmetadata', () => {
   }
 });
 
+// 兜底自愈：极少数容器在 loadedmetadata 时还拿不到画面尺寸，会把"有画面的视频"误判成纯音频，
+// 于是长期停在音乐界面（字幕/截图按钮被隐藏、画面被效果层盖住）且没有纠正机会。
+// 首个可解码帧就绪（loadeddata）时复检一次，一旦发现其实有画面就立刻退出音乐模式。
+video.addEventListener('loadeddata', () => {
+  if (isMusicMode && (video.videoWidth > 0 || video.videoHeight > 0)) exitMusicMode();
+});
+
 // 频谱动画跟随播放状态：播放即动、暂停即停（省电，不空转）
 video.addEventListener('play', () => {
   // 手动重播（播完 1 秒窗口内点播放/按空格/单击画面）时作废挂起的自动切集，
@@ -1700,8 +1763,12 @@ if (aspectMenu) {
   });
 }
 
-// 初始化比例按钮文字（与实际状态一致：默认自动）
-applyAspectMode(aspectModes[0]);
+// 画面比例初始化：applyVideoLayout 内部要读 clientWidth/clientHeight（强制同步布局），
+// 放在脚本里会挡在首帧之前。延后到首帧再算——index.html 中比例按钮文案与菜单选中态
+// 本来就是"自动"这一默认状态，所以延后完全看不出差别。
+requestAnimationFrame(() => {
+  applyAspectMode(aspectModes[0]);
+});
 
 // === 外挂字幕解析渲染引擎 (.srt / .vtt / .ass 基础支持) ===
 function stripAssTags(text) {
@@ -1721,7 +1788,9 @@ function parseAndApplySubtitle(text) {
   // 标准化换行符
   const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-  const isAss = /^\s*Dialogue:/m.test(normalized);
+  // 大小写不敏感：下面的逐行解析用 toLowerCase 判断 "dialogue:"，
+  // 若这里区分大小写，小写 dialogue: 的文件会被当成 SRT 解析、最终一条字幕都读不出来
+  const isAss = /^\s*Dialogue:/im.test(normalized);
 
   if (isAss) {
     // ASS / SSA 格式：标准 Dialogue 为逗号分隔字段
@@ -2056,8 +2125,7 @@ function captureScreenshot() {
 }
 
 // === 外观主题切换（浅色 / 深色，默认深色；状态记忆于 persistSettings） ===
-const SUN_ICON = '<circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.77 1.77M17.33 17.33l1.77 1.77M4.9 19.1l1.77-1.77M17.33 6.67l1.77-1.77"/>';
-const MOON_ICON = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+// SUN_ICON / MOON_ICON 已上移到 restoreSettings 之前声明（避免 TDZ 导致启动恢复中断），此处不再重复声明。
 function isLightTheme() { return document.documentElement.dataset.theme === 'light'; }
 function applyAppearance(isLight) {
   const root = document.documentElement;
