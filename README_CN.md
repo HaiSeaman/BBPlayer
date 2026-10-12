@@ -2,11 +2,11 @@
 
 <div align="center">
 
-![Electron](https://img.shields.io/badge/Electron-34.x-47848F?style=for-the-badge&logo=electron&logoColor=white)
+![Electron](https://img.shields.io/badge/Electron-44.x-47848F?style=for-the-badge&logo=electron&logoColor=white)
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-1.7.0-ff3b4e?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.9.0-ff3b4e?style=for-the-badge)
 
 **纯粹、轻量、高颜值的 Windows 无边框本地多媒体播放器**
 
@@ -24,7 +24,7 @@
 
 软件遵循 **"安静玻璃"** 设计哲学：让界面随时消失，画面本身才是主角。幽灵图标控制栏、全透明标题栏、唯一的彩虹品牌强调，加上极致的 GPU/CPU 预算控制（整个界面仅一处 `backdrop-filter`），带来沉浸式、原生般的影音体验。
 
-> **一眼亮点** —— 多窗口同时播放、200% 音量增益（带防破音）、完整音乐模式（频谱可视化 + 封面环境光）、自研 SRT/VTT/ASS/SSA 字幕引擎（含 GBK 编码识别）、25 种关联媒体格式全彩虹文件图标。
+> **一眼亮点** —— 多窗口同时播放、200% 音量增益（带防破音）、完整音乐模式（频谱可视化 + 封面环境光）、自研 SRT/VTT/ASS/SSA 字幕引擎（含 GBK 编码识别）、**25 种媒体格式全彩虹文件图标（老格式由内置转换器自动转成可播）**。
 
 ---
 
@@ -63,7 +63,7 @@
 
 ### 🎨 外观
 - **浅色 / 深色双主题**一键切换；语义化 CSS 变量保证两套主题下文字与控件始终清晰；主题选择自动记忆。
-- 25 种媒体格式文件关联、单实例锁、窗口大小/位置记忆（含最大化状态）。
+- **25 种媒体格式文件关联**（其中 11 种由内置转换器自动转换后播放）、单实例锁、窗口大小/位置记忆（含最大化状态）。
 
 ---
 
@@ -71,10 +71,23 @@
 
 | 类型 | 格式 |
 |---|---|
-| **视频** | MP4 · MKV · AVI · MOV · WebM · FLV · WMV · M4V · TS · RMVB · RM · 3GP · MPG · MPEG · M2TS · VOB · OGV · F4V · M2V |
+| **视频（内核直接播放）** | MP4 · MKV · MOV · WebM · M4V · 3GP · OGV · F4V |
+| **视频（自动转换后播放）** | AVI · FLV · WMV · TS · RMVB · RM · MPG · MPEG · M2TS · VOB · M2V |
 | **音频** | MP3 · FLAC · WAV · OGG · M4A · AAC |
 
-全部解码由 Chromium 原生完成——零第三方解码器、零额外依赖。文件关联由安装包生成，双击任一关联文件即可直接用 BBPlayer 打开。
+25 种格式都能双击直接打开。内核本来就支持的直接播放；第二类由**内置 FFmpeg 转换器**自动处理，按代价分三档：
+
+| 档位 | 什么时候用 | 代价 |
+|---|---|---|
+| 只换容器 | TS / M2TS / FLV(H.264) / AVI(H.264) 这类"外壳不认、编码没问题"的 | **不到 1 秒**，画质零损失 |
+| 只换音频 | 画面没问题、但音轨是 AC3 / EAC3 / DTS 的（**很多高清片源都没声音就是这个原因**） | **不到 1 秒**，视频零损失 |
+| 重新编码 | RMVB / WMV / Xvid(DivX) / MPEG-1/2（VOB、MPG）/ Theora / ProRes / H.263 等老编码 | 要等（1080p 大约 2～10 倍速），有轻微画质损失 |
+
+- 转换进度在界面上实时显示（"正在换容器… 45%"），可随时切走取消；转好的文件会缓存，**第二次打开秒开**。
+- 探测判定"能播"、但内核实际播不出画面或声音时，会自动改用重新编码 / 换音频（运行时兜底，每个文件只兜一次）。
+- 内置的是 **LGPL 版 FFmpeg**，以独立进程方式调用（不链接、不修改），其许可证文本随程序一并分发；缺失时软件自动降级——这些老格式会提示播不了，其余格式不受影响。
+
+除上面的内置转换器外，全部解码由 Chromium 原生完成——没有其它第三方解码库、也没有运行时 npm 依赖。文件关联由安装包生成，双击任一关联文件即可直接用 BBPlayer 打开。
 
 ---
 
@@ -131,10 +144,14 @@ BBPlayer/
 ├── main.js                 # 主进程：多窗口工厂、IPC 信任面、文件对话框、目录扫描
 ├── preload.js              # 上下文隔离桥接（contextBridge → window.electronAPI）
 ├── renderer.js             # 渲染层全部业务：播放状态机、字幕引擎、手势、频谱、主题
+├── converter.js            # 媒体兼容层：探测 + 三档转换 + 缓存 + 并发队列
 ├── index.html              # 单文件视图：DOM + 全部 CSS（语义变量、双主题、彩虹色标）
 ├── shared-video-exts.js    # 单一事实来源：视频/音频扩展名列表
 ├── shared-subtitle-exts.js # 单一事实来源：字幕扩展名列表
 ├── verify-exts.js          # 一致性对账：共享列表 ↔ package.json 文件关联
+├── verify-converter.js     # 转换层自检：判定规则 + 真实转换冒烟
+├── verify-renderer.js      # 渲染层自检：Node vm 真实执行 renderer.js + DOM/Electron 桩
+├── verify-wiring.js        # 接线对账：打包清单 / preload API / IPC 通道 / HTML 引用
 ├── build/                  # 应用图标（彩虹渐变播放三角，ico/png）
 └── package.json            # 元数据 + electron-builder 配置
 ```

@@ -43,9 +43,13 @@ Thumbs.db
 *.swo
 *~
 
+# 内置转换器（LGPL 版 FFmpeg，体积大不进仓库；缺失时软件自动降级为仅原生播放）
+vendor/ffmpeg/
+
 # AI 辅助与环境配置 (AI & Environment)
 .env
 .env.local
 .env.*.local
 .workbuddy
-.reasonix
+.commandcode/
+.reasonix/

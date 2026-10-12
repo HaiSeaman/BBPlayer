@@ -56,11 +56,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     }
   },
 
-  // 本地路径转 file:// URL（异步；主进程用完整 Node 标准库转换，避免 sendSync 阻塞渲染进程）
-  toFileUrl: (p) => {
-    if (typeof p !== 'string' || !p) return Promise.resolve('');
-    return ipcRenderer.invoke('path-to-url', p).then((url) => url || '').catch(() => '');
-  },
+  // 让内核播不了的格式（avi/flv/wmv/ts/rmvb 等）先转成能播的 MP4，返回可直接播放的 file:// URL。
+  // 原生可播的格式也会经这里返回原文件的 file:// URL（统一入口，渲染端不必自己转换路径）。
+  // force 只在运行时兜底时用：'transcode'（画面解不出）或 'audiofix'（音轨解不出）。
+  prepareMedia: (filePath, force) => ipcRenderer.invoke('media:prepare', filePath, force || null),
+
+  // 查询文件的容器/编码信息（运行时兜底据此判断是否需要转换、该转哪一档）
+  probeMedia: (filePath) => ipcRenderer.invoke('media:probe', filePath),
+
+  // 转换进度（换容器/换音频/重编码）
+  onConvertProgress: makeIdempotentSubscriber('media:convert-progress'),
+
+  // 转换失败原因（用于给出明确提示，而不是"点了没反应"）
+  onConvertFailed: makeIdempotentSubscriber('media:convert-failed'),
 
   // 查找音频文件同目录的封面图（cover.jpg/folder.jpg/同名图片），返回 file:// URL 或 null
   findCover: (filePath) => ipcRenderer.invoke('file:findCover', filePath),

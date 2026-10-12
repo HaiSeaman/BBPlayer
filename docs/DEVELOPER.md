@@ -9,13 +9,18 @@
 
 ```
 BBPlayer/
-├── main.js                 # Electron 主进程：多窗口工厂/状态记忆、IPC 信任面、文件对话框、目录扫描
+├── main.js                 # Electron 主进程：多窗口工厂/状态记忆、IPC 信任面、文件对话框、目录扫描、媒体兼容层接线
 ├── preload.js              # 预加载脚本：contextBridge 暴露 electronAPI（渲染进程唯一系统入口）
 ├── renderer.js             # 渲染层全部业务逻辑（约 2400 行，单文件策略，每窗口一份独立实例）
+├── converter.js            # 媒体兼容层：探测 + 三档转换（换容器/换音频/重编码）+ 缓存 + 并发队列（v1.8.0 新增）
 ├── index.html              # 界面结构 + 全部内联 CSS（"安静玻璃"低占用视觉 + 彩虹品牌体系 + 音乐播放效果层）
-├── shared-video-exts.js    # 视频/音频扩展名单一事实来源：结构化 { video, audio, all }
+├── shared-video-exts.js    # 媒体扩展名单一事实来源：{ video, convertibleVideo, audio, all, nativeAll }
 ├── shared-subtitle-exts.js # 字幕扩展名单一事实来源：['srt','vtt','ass','ssa']（v1.6.1 新增）
 ├── verify-exts.js          # 扩展名一致性对账脚本（shared-video-exts ↔ package.json fileAssociations）
+├── verify-converter.js     # 转换层自检：判定规则单测 + 真实样本对账 + 真实转换冒烟（v1.8.0 新增）
+├── verify-renderer.js      # 渲染层无界面自检：DOM 桩真实执行 renderer.js 顶层脚本与事件回调（v1.8.0 新增）
+├── verify-wiring.js        # 端到端接线对账：打包清单/preload API/IPC 通道/HTML 引用（v1.8.0 新增）
+├── vendor/ffmpeg/          # 内置 LGPL 版 FFmpeg（不进仓库；打包经 extraResources 落到 resources/ffmpeg）
 ├── run-test.bat            # 源码方式启动测试（自动检测 Node/Electron 环境）
 ├── build/                  # 打包图标（彩虹渐变播放三角 ico/png，v1.6.1 重制）
 └── package.json            # 元数据 + electron-builder 配置
@@ -442,7 +447,293 @@ v1.7.0 修复的真实案例就是 `SUN_ICON` / `MOON_ICON`（见版本明细 B 
 
 ---
 
+### 20. 媒体兼容层：内置 FFmpeg 三档转换（v1.8.0 新增）
+
+**目标**：让内核（Chromium）打不开的老格式也能在同一个 `<video>` 里播——
+AVI / FLV / WMV / TS / RMVB / RM / MPG / MPEG / M2TS / VOB / M2V，以及"容器合法但音轨解不出"的
+AC3 / EAC3 / DTS（高清片源"有画面没声音"的元凶）。
+
+**论证与全部实测数据见 `docs/FORMAT-EXPANSION-REPORT.md`**（含 22 样本 × 3 档的真机对账、
+性能测量、四个方案对比、以及"为什么不能换 mpv/libvlc 内核"的调研出处）。这里只记工程实现要点。
+
+**核心设计**（`converter.js`，主进程侧，刻意不依赖 electron 以便用普通 node 自检）：
+
+1. **三档判定**（`decideTier`）：容器在内核白名单内 + 视频/音频编码在内核白名单内 → `native`（什么都不做）；
+   只差容器 → `remux`（`-c copy`，实测 0.1 秒级、无损）；视频 OK 但音频不 OK → `audiofix`
+   （`-c:v copy -c:a aac`，同样秒级）；视频编码内核不认 → `transcode`。
+   音频白名单**必须按实测来**：MP2 实测内核能解（算"能播"），表外编码一律按"需要换音频"处理（代价极小）。
+2. **原生扩展名走快速通道**：`mp4/mkv/mov/webm/m4v/3gp/ogv/f4v` + 全部音频扩展名**不探测、不转换**，
+   直接原样播放——不能为了少数老格式让日常格式多付一次 ffmpeg 启动开销（实测 0ms vs 130ms）。
+   这些文件里的怪编码（mp4 装 Xvid、MKV 装 DTS、无硬件解码的 HEVC）交给运行时兜底。
+3. **运行时兜底**（渲染端，每个文件只兜一次）：加载后仍拿不到画面尺寸且不是音频文件 → 请求重编码；
+   画面正常但 `webkitAudioDecodedByteCount` 恒为 0 且文件确有音轨 → 请求只换音频。
+4. **播放源与影片身份分离**：`currentFilePath`（标题/历史/续播/同名字幕）始终是**原始文件**；
+   转换产物只作为 `<video>` 的 src。否则标题会变成临时文件名、历史会记一堆临时路径、同名字幕会找不到。
+5. **产物与缓存**：`%TEMP%/BBPlayer-convert/<原名>.<路径哈希>.<大小>.<时间>.<档位>.<管线版本>.mp4`；
+   先写 `.part.mp4` 再原子改名（**必须保留 .mp4 结尾**——ffmpeg 靠扩展名挑封装器，写成 `.mp4.part` 会直接失败）；
+   启动时清碎片、超 20GB 按最久未访问淘汰。
+6. **并发与取消**：全局队列并发 1；同一窗口换片时按"代号"作废旧任务并杀掉子进程；
+   关窗/退出时 `killActive()`，不留孤儿 ffmpeg。进程优先级降到 below normal。
+7. **编码器选择**：`h264_nvenc → h264_qsv → h264_amf → libx264（GPL 构建才有）→ libopenh264`（LGPL 构建的软编码兜底）。
+   注意三点实测经验：① 硬件编码器"列在表里"不等于能用——本机 ffmpeg master 版要求 NVENC API 13.1、
+   驱动只有 13.0，会报 `Driver does not support the required nvenc API version`，**这种错必须被识别成"换下一个编码器"**，
+   否则本该退到软编码的转码会直接失败；② **输入文件本身的错误（坏文件/半截下载/没权限）必须直接失败**，
+   不能也当成"换编码器重试"，否则一个坏文件会白跑 4 遍；③ OpenH264 只能按码率来，必须随分辨率给值
+   （≥1000 像素高 6M / ≥700 4M / 其余 2M），否则 SD 老片会被灌成 4Mbps 的巨文件。
+8. **进度上报**：命令里必须带 `-progress pipe:1 -nostats`。**漏掉这个参数时 ffmpeg 一个字都不往 stdout 写，
+   进度回调永远不会触发**（界面在长转码期间看不到任何百分比）——`verify-converter.js` 里有一条测试专门盯它。
+9. **看门狗与并发闸门**：转码进程 120 秒无任何输出就杀掉（源文件在掉线网络盘/坏道上时 ffmpeg 会不退出也不报错，
+   而队列并发是 1，会永久堵死整个转换层）；探测进程限流 2 个并发（渲染端一旦循环调用不会拉起几百个 ffmpeg）；
+   所有子进程登记在册，关窗/退出统一杀干净。
+10. **缓存的两条语义**（容易搞混，改代码前先看这条）：
+    - 普通打开：命中缓存直接用（第二次打开秒开）。
+    - **强制档位（`force`）= 运行时兜底**：说明现有产物播不出来，**必须绕过缓存重转一次**，否则命中同一个废产物、兜底等于空转。
+    - 反过来，原生扩展名的文件（mkv/mp4 装 AC3/DTS、mp4 装 Xvid）在普通打开时会先查"有没有它的强制档产物"，
+      有就直接复用——否则第二次打开又会静音/黑屏，而"每文件一次"的兜底已被挡掉，用户只能重启。
+11. **磁盘预检按产物估算**，不是按源文件体积：换容器/换音频 ≈ 源大小+300MB；重编码按 `目标码率×时长×1.5`。
+    曾经用"源×1.5"估，结果 20GB 的 VOB 被要求 30GB 空间（实际产物 1~2GB），明明能转却被拒。
+12. **安全**：`spawn` 传参数组（不拼 shell 命令）、`windowsHide`、输入路径过扩展名白名单 + 存在性校验、
+    输出路径由主进程自己拼、磁盘空间预检、单文件产物体积有上限。
+
+**验证**：`npm run verify` 会跑 `verify-exts.js`（扩展名三层对账：原生 8 + 需转换 11 + 音频 6 = 25）
+与 `verify-converter.js`（判定规则单测 + 真实样本对账 + 真实转换冒烟 + 缓存命中）。
+设 `BB_SAMPLES` 指向样本目录即可启用"真实样本"部分：
+
+```powershell
+$env:BB_SAMPLES = "D:\你的\样本目录"   # 至少包含 20_h264_aac.ts / 13_xvid_mp3.avi / 41_mkv_h264_ac3.mkv
+npm run verify
+```
+
+**未做（有意）**：换播放内核（mpv/libvlc，代价见报告 3.C）、自编 Chromium 拿 HEVC/AC3 平台解码（报告 3.D）、
+边转边播（P3 可选）、多音轨选择、内嵌字幕烧录。
+
+---
+
 ## 三、版本变更明细
+
+### v1.9.0——Electron 34→44 升级 + 审计确认 bug 修复 + 运行时开销收敛
+
+> 本节记录 v1.9.0 相对 v1.8.0 的实际改动。审计依据见 `electron-perf-research.md`
+> 与 `docs/PERF-REVIEW-1.7.0.md`（含实测数据）；这里只记"改了什么、为什么"。
+
+#### A. 依赖升级
+
+1. **Electron 34.5.8 → 44.7.0**（最新稳定版）：吃到官方三个启动优化 PR
+   （主进程 Node 启动快照 −25% spawn→ready、js2c 构建期代码缓存、preload 字节码缓存
+   + mojo 预推），Electron 34 已 EOL。静态核对 34→44 全部破坏性变更
+   （clipboard 渲染端移除 / macOS 12 下线 / ANGLE 静态链接 / net.request 帧校验 /
+   32 位构建移除）与本项目 API 面零冲突——项目不用 clipboard、不发网络请求、只发 x64。
+2. **electron-builder 25.1.8 → 26.17.0**：清掉 `npm audit` 报的 1 critical + 16 high
+   （全部在打包工具链的 tar/xmldom/glob 依赖里，不进软件本体），同时确保对新
+   Electron 44 的打包兼容。剩余 8 个低危均为工具链传递依赖。
+
+#### B. 正确性修复（每条都有新增测试盯住，测试先 RED 后 GREEN）
+
+1. **拖入字幕解码期间换片：旧字幕挂上新视频（竞态）**：
+   `loadDraggedSubtitle()` 纯拖字幕分支在两次 await 后直接应用到"当前"画面，
+   未核对发起时的视频路径——解码期间用户切片，旧字幕串到新视频上，且
+   `manualSubtitleFor` 被污染，新片的同名自动字幕被永久压制。姐妹函数
+   `loadSubtitleFromPath` 有 `expectedVideoPath` 校验，唯独拖拽路径漏了。
+   修复：入口记 `startVideoPath`，应用前不一致即丢弃。
+2. **`scheduleAudioCheck` 少查 `loadSequence`（竞态）**：只比 `currentFilePath` 不足以
+   识别"同路径重新加载"（失败自动跳回 / 清空重开），3 秒后的探测会落在新的加载序列上。
+   修复：安排定时器时记 `scheduledSeq`，回调开头先比对（对齐兄弟函数
+   `scheduleNoPictureCheck` 的既有纪律）。
+3. **`loadAndPlayVideo` 历史续播监听器泄漏**：`hasRealPath` 分支每次加载注册一对
+   `loadedmetadata`/`error` 临时监听器，靠这两个事件触发清理；但"旧加载被新加载打断"
+   时换 `src` 只触发 `emptied`/`abort`，旧对永远等不到自己的事件——快速连切 20 次
+   实测泄漏 40 个监听器，之后每次 `loadedmetadata` 都空跑一批作废回调。
+   修复：单例注册（新加载先卸旧对，任何时刻至多 1 对在挂）；红绿回滚验证 +
+   续播功能行为锁（有历史的视频 loadedmetadata 仍弹续播提示）双确认。
+
+#### C. 运行时开销收敛（审计确认的热路径，逻辑零变化）
+
+1. **mousemove 热路径 rAF 合帧**：`updateControlsOnMouseMove` 内有
+   `getBoundingClientRect()` 强制同步布局，高回报率鼠标（1000Hz）下每秒可达千次。
+   改为 rAF 合帧（一帧只处理最后一次事件，与 `bindWindowDrag` 同一思路）。
+2. **截图位图立即释放**：4K 一张约 33MB 的 canvas 位图，`toBlob` 后立即
+   `canvas.width = canvas.height = 0`，不等 GC——连续截图峰值从 N×33MB 压回单张量级。
+3. **频谱渐变缓存（尝试后撤销）**：曾把逐帧 `createLinearGradient`×32 改为固定坐标
+   (0,0)-(0,H) 缓存，代码审查发现矮柱（3px 基座）落在固定渐变最暗端几乎不可见
+   （视觉回归），已回退为原版逐帧创建并在代码注释记录结论——GC 代价审计定级
+   "可忽略"，视觉保真优先。
+
+#### D. 验证（全部无界面）
+
+37 项 renderer 自检 + exts/converter/wiring 四件套全绿；打包产物逐项核对。
+
+#### E. 遗留事项（评估后未改，附理由）
+
+- **多窗口 localStorage 互相覆盖**：各窗口各持一份 history/settings，后写覆盖先写；根治要改为
+  主进程集中持久化，属架构级改动，本版未动（同 v1.8.0 G 节）；
+- **外部播放器兜底（方案 A）**：仍只做到"明确提示失败原因"（Toast 显示具体原因），
+  未提供"用系统里其它播放器打开"的按钮——属新功能，不在本版夹带（同 v1.8.0 G 节）；
+- **边转边播（P3）、多音轨选择、内嵌字幕烧录**：维持"未做（有意）"；
+- **频谱渐变缓存优化**：本版尝试过后因视觉回归**主动回退**（见 C 节第 3 条），不再列为待办。
+
+### v1.8.0——媒体兼容层（内置 FFmpeg 三档转换）+ 全量审查修复与无界面测试基建
+
+> 本节记录 v1.8.0 相对 v1.7.0 的实际改动。转换层的设计与实测数据见第 20 节与
+> `docs/FORMAT-EXPANSION-REPORT.md`；这里只记"改了什么、为什么"。
+
+#### A. 新功能
+
+1. **媒体兼容层**（新模块 `converter.js` + `main.js` 接线 + `renderer.js` 反馈/兜底）：
+   avi/flv/wmv/ts/rmvb 等内核打不开的格式，按"能播不动 / 只换容器 / 只换音频 / 重编码"
+   四档处理；带缓存、全局并发 1 的队列、按窗口作废、看门狗、编码器逐个回退。详见第 20 节。
+2. **扩展名三层化**：`shared-video-exts.js` 拆为 `video` / `convertibleVideo` / `audio` / `all` / `nativeAll`，
+   文件关联同步加回 11 个"需转换"扩展名（总计 25）。字幕扩展名抽出 `shared-subtitle-exts.js`
+   收敛原先 4 处硬编码。
+
+#### B. 正确性修复（本轮全量审查，每条都有测试盯住）
+
+1. **换片时旧转换任务作废失效（严重，实测堵住新片 37.8 秒）**：
+   `prepare()` 里"记下当前代号"的 `const myGen = generationOf(key)` 原本写在**探测之后**，
+   而探测是最慢的一步（起一个 ffmpeg 解析头部，可能要几秒）。于是这条时间线会出事：
+   打开长片（开始探测）→ 用户 80ms 后换片（`invalidate` 让代号 +1）→ 长片探测完**才**读代号，
+   读到的已经是**作废后的新代号**，于是长片误以为自己有效，把整个长片完整转码排进队列，
+   把用户真正在等的新片堵在后面（队列并发是 1）。
+   **实测数据：修复前新片等 37791ms，修复后 436ms（快约 87 倍），且旧任务被正确作废。**
+   修复与纪律：**代号必须在 `prepare()` 一进来、任何 `await` 之前记录**，
+   并在每个耗时 await（`stat` / `isAvailable` / `probeFile`）之后补校验点。
+   这条已固化为 `verify-converter.js` 第二层 A 的"换片作废"用例（自带样本，
+   默认就会跑，不依赖 `BB_SAMPLES`）。
+2. **菜单里手动选字幕被静默拒绝（严重）**：`loadSubtitleFromPath()` 内原有
+   `if (manualSubtitleFor === expectedVideoPath) return false` 这道"手动优先"保护，
+   本意是**只拦同名字幕的自动加载**，但菜单里"加载字幕文件…"走的也是同一个函数、
+   传的 `expectedVideoPath` 正是当前视频——于是用户一旦给这个视频配过字幕（拖入过），
+   再想换一个字幕就会被判为"加载字幕文件失败"，且此后**再也换不了字幕**（永久卡死）。
+   修复：把"手动优先"判断上移到 `checkAndAutoLoadSubtitles()`（自动加载专属），
+   菜单加载成功后反向登记 `manualSubtitleFor`，手动优先契约保持不变。
+3. **产物体积上限缺失**：第 20 节与开发报告都声称"单文件产物体积有上限"，代码里其实没有——
+   磁盘预检只是"按目标码率×时长估算"，估算偏小或素材异常时仍可能把磁盘写满。
+   修复：新增 `maxOutputBytes`（16GB）闸门，判定依据用 ffmpeg 自报的 `total_size`
+   （`-progress` 输出本就有，零额外 IO）。**为什么不用 ffmpeg 的 `-fs`**：实测它触顶时
+   以异常码退出、产物根本不落地，等于把已经转了一半的工作白扔；这里改为实时监控、
+   超限主动中止，并抛出带 `isOutputTooLarge` 标记的明确错误（不再被当成编码器故障重试）。
+4. **子进程收尾非幂等**（进程泄漏）：`runFfmpegOnce` 的 `finish()` 没有幂等保护，
+   而实测 `spawn` 失败时 `'error'` 与 `'close'` **都会**触发 → `finish()` 跑两次，
+   第二次会把 `activeChild`/`activeKey` 无条件置空。若此时队列已换到下一个任务，
+   就会把"正在跑的进程"的登记抹掉，导致 `invalidate()` 再也杀不掉它（孤儿 ffmpeg 吃 CPU）。
+   修复：加 `finished` 幂等闸 + `if (activeChild === child)` 只清理属于自己的登记。
+5. **转码进程未降优先级**：第 20 节与开发报告都写了"进程优先级降到 below normal"，
+   代码里没有。修复：`lowerPriority()` 对子进程调 `os.setPriority(PRIORITY_BELOW_NORMAL)`，
+   失败一律忽略（权限不足时只影响流畅度，绝不让转换失败）。
+6. **进度文案与文档不符**：README 承诺显示"正在换容器… 45%"，而 `converter` 从不回传真实档位、
+   界面只有笼统的"正在转换格式"，用户无法区分"秒级换壳"与"要等几分钟的重编码"。
+   修复：`prepare()` 探测出档位后立刻回报一次（`stage:'decided'`），
+   渲染端用 `CONVERT_TIER_LABEL` 单一映射表翻译成"正在换容器/转换音频/重新编码"。
+7. **主进程同步磁盘读回流**：v1.7.0 明文纪律"把 `existsSync/statSync/readFileSync` 全部改为
+   `fs.promises`，避免同步磁盘读阻塞主进程"，而本次新增的 `media:prepare` / `media:probe` /
+   `window:openInNewWindow` / `path-to-url` 又用了同步 `fs.existsSync`。
+   修复：抽出共用的异步校验 `resolveMediaPath()`，四处统一走它（多窗口并存时同步读等于卡住所有窗口）。
+8. **看门狗超时被误报成"用户取消"，真实原因被静默吞掉**：
+   看门狗 120 秒无输出就 `kill`，而 close 回调里 `if (signal) return reject(makeCancelledError())`
+   会先命中——**实测 Windows 上 kill 后回调正是 `code=null, signal=SIGTERM`**，与"用户换片主动取消"
+   在事件层面完全一样。于是"源文件所在磁盘/网络位置断开、有坏道"这类真实原因被伪装成"用户取消"，
+   再被 `main.js` 静默处理，用户只看到"无法解析媒体源"，误以为文件坏了。
+   修复：看门狗触发前先置 `timedOut` 标志，close 回调里**优先于 signal** 判断它，
+   抛出带 `isTimeout` 标记的明确错误（"转换超时：源文件 120 秒无任何响应，可能所在的磁盘/网络位置
+   已断开或存在坏道"），并在转码重试循环里直接失败（换编码器只会再等 120 秒）。
+9. **窗口尺寸未钳进工作区 → 换小屏后无边框窗口关不掉**：
+   `loadWindowState()` 原本只校验"可见区 ≥50×50"，**不钳制宽高**。
+   实测复算：在 4K 屏存下 3000×1600，之后用 1920×1080 屏启动 → 可见区 1820 通过了校验，
+   x/y 保留，但窗口比屏幕宽 1180px。本软件是 `frame: false` 无边框窗口，
+   最小化/最大化/关闭三个按钮**都画在窗口右上角**（DOM 自绘，不是系统标题栏）——
+   它们整体落在屏幕外，用户**关不掉也拖不动**这个窗口。
+   修复：位置校验通过后，把 `width/height` 用工作区尺寸钳一次，再把 x/y 收进工作区。
+10. **缓存"按最久未访问淘汰"在 Windows 上失效，退化成按创建时间**：
+    `cleanup()` 用 `st.atimeMs || st.mtimeMs` 排序，而**实测 NTFS 默认不更新 last access time**
+    （写文件后读取一次，`atimeMs` 完全不变，恒等于创建时间）。
+    后果与设计意图正好相反：天天看的老剧（老文件）先被删、只看过一次的新文件反而留着；
+    且 `maxOutputBytes=16GB / maxCacheBytes=20GB`，攒够两个大产物就会触发淘汰，
+    可能删掉用户**正在看**的那个产物（拖进度到未缓冲处就失败）。
+    修复：新增内存表 `lastUsedAt`，在每次产物被使用（命中缓存或新产出）时打标记，
+    淘汰按"进程内最后使用时间"排序，缺记录（刚重启）才退回 `mtime`。**绝不再用 atime**。
+11. **原生扩展名的强制档产物复用顺序反了**：
+    快速通道里 `for (const t of ['audiofix', 'transcode'])` 先命中 audiofix。
+    而 transcode 产物是在"画面也解不出"时转的，是 audiofix 的超集；反过来会导致
+    "先只换音频、后又要重编码"的文件第二次打开复用到那个**已知播不出来**的 audiofix 产物，
+    必然又黑屏一次。修复：顺序改为 `['transcode', 'audiofix']`。
+12. **目录扫描深度超限静默丢文件**：`scanDirectorySafe` 的 `if (depth > maxDepth) return;`
+    既不收文件也不置 `truncated=true`（而数量触顶那段会如实标记）。
+    目录嵌套超过 4 层时深层视频静默消失，用户以为"这个文件夹就这些片子"。
+    修复：深度超限时同样置 `truncated=true`，由界面统一提示"文件夹较大/较深，未全部载入"。
+
+#### C. 性能
+
+- **均衡器暂停指示收敛作用域**：`is-paused` 原先挂在**整个列表容器**上，导致每次播放/暂停切换
+  （`updatePlayPauseUI`）都要让列表里每一条的动画样式重算（500 条 = 1500 个子元素），
+  而其中只有当前那一条真正在动。改为只标当前条目（`syncPlaylistPauseIndicator()`，
+  在重建列表与轻量高亮路径后都会重挂），CSS 选择器同步改为 `.playlist-item.is-paused`。
+  这是 `docs/PERF-REVIEW-1.7.0.md` 补充四认定的"唯一确认的真问题"，本轮已修完。
+- **清理界面里 147 处 `data-page-node-id` 属性**：外部工具误注入，全仓无任何 JS/CSS 引用，
+  纯属污染（index.html 减少约 7.6KB）。
+
+#### D. 工程质量（无界面测试基建）
+
+v1.7.0 的质量保障只有"语法门禁 + 扩展名对账"，渲染层 2600 行完全没有自动化测试——
+而框架最容易出的恰恰是"静默失效"（顶层求值抛错被 try/catch 吞掉、DOM id 改名导致功能失效）。
+本轮补齐三套无界面自检，并把它们串进 `npm run verify`：
+
+| 脚本 | 覆盖 |
+|---|---|
+| `verify-converter.js` | 第一层纯逻辑单测；**第二层 A 自带样本的真实转换**（默认就跑：换片作废、真实转换落地、缓存命中、体积闸门）；第二层 B 真实样本对账（可选，需 `BB_SAMPLES`） |
+| `verify-renderer.js` | Node `vm` + DOM/Electron 桩**真实执行 renderer.js 顶层脚本**并驱动事件回调：界面结构契约（id 对账）、设置恢复链路完整性、字幕解析（10 种真实畸形写法）与加载、播放列表索引维护、失败熔断与自动跳集、音乐模式判定与自愈、均衡器作用域、兜底令牌防竞态、时长不可用时不写入无效值 |
+| `verify-wiring.js` | 零构建应用的手写契约对账：打包清单、主进程依赖、preload 暴露的 API ↔ renderer 调用、IPC 通道收发双向、HTML 资源引用 |
+
+关键设计两条：
+
+1. **`verify-renderer.js` 测的是真代码**（`vm` 执行真实 `renderer.js`），不是复制出来的副本——
+   否则"改了产品代码但忘了同步测试副本"就会变成假绿。
+2. **关键的转换行为必须自带样本**：旧版把"换片作废 / 产物落地 / 体积闸门 / 进度上报"
+   全部塞在"需要 `BB_SAMPLES` 外部样本"的分支里，结果默认环境下一条都跑不到，
+   等于没有保护（本轮那个"换片堵 37.8 秒"的严重缺陷正是因此长期没被发现）。
+   现在这些用例自己用内置 ffmpeg 造样本，只要 ffmpeg 在就会跑。
+
+每条修复都补了能抓住它的断言，并做了红-绿验证（把修复还原 → 测试确实失败 → 恢复 → 通过）。
+
+#### E. 文档一致性
+
+- README_CN.md 删掉与内置 FFmpeg 直接矛盾的"全部解码由 Chromium 原生完成——零第三方解码器"，
+  改为"除内置转换器外无其它第三方解码库、无运行时 npm 依赖"；
+- DEVELOPER.md 语法门禁文件清单补入 `converter.js` / `verify-converter.js` / 两个新脚本
+  （新增 JS 文件必须同步加进这个清单）；项目结构树、测试章节同步补齐。
+
+#### F. 验证
+
+- 10 个 JS 文件 `node --check` 逐个通过；
+- `npm run verify` 四套自检全绿：扩展名对账（25 = 8+11+6）、converter 35 项（含自带样本的
+  换片作废 / 真实转换 / 体积闸门，以及看门狗错误分类、atime 淘汰、产物复用顺序的静态盯防）、
+  renderer 32 项、接线对账（含窗口钳制与目录截断标记的静态盯防）；
+- 端到端静态对账：打包 8 个必需文件齐全、3 个主进程依赖可解析、renderer 调用的 24 个 API
+  全部已暴露、IPC 18 发/5 收全部对得上、HTML 引用齐全；
+- **红-绿验证（两轮）**：
+  - 把"换片作废"的修复还原成缺陷态后，`verify-converter.js` 确实失败（退出码 1）；恢复后通过
+    （新片 394ms 返回）；
+  - 把 atime 淘汰、产物复用顺序、目录截断标记三处还原成缺陷态后，`verify-converter.js` 与
+    `verify-wiring.js` 均确实失败（分别报出"不能按 atime 排序"与"深度超限必须置 truncated"）；
+    恢复后全部通过。证明这些盯防断言有分辨力，不是摆设；
+- 真实转换实测：换容器产物落地且二次打开命中缓存、产物体积闸门在 1 秒内拦住超限并清掉碎片、
+  上限恢复正常后同一文件能正常转出（闸门不误伤）；
+- 打包产物校验：`electron-builder` 打出安装版与便携版，`app.asar` 内的 7 个源文件与工作区
+  源码**逐字节哈希一致**（确认打进 exe 的就是修复后的代码），`resources/ffmpeg` 9 个文件
+  153.5MB 随包齐全；
+- 未做 GUI/界面测试（按项目铁律，只做无界面逻辑验证）。
+
+#### G. 遗留事项（评估后未改，附理由）
+
+- ~~**升级 Electron**~~：已于 v1.9.0 完成（34.5.8 → 44.7.0，含官方三个启动优化 PR：
+  主进程 Node 启动快照 / js2c 构建期代码缓存 / preload 字节码缓存）。
+  静态核对确认 34→44 全部破坏性变更（clipboard 渲染端移除、macOS 12、ANGLE 静态链接、
+  net.request 帧校验、32 位构建移除）与本项目 API 面零冲突；34 项无界面自检全绿；
+- **多窗口 localStorage 互相覆盖**：真实存在（各窗口各持一份 history/settings，
+  后写覆盖先写），根治要改成主进程集中持久化，属架构级改动，本版未动；
+- **外部播放器兜底（方案 A）**：开发报告 4.5 提到"转换失败 → 退回提示 + 外部播放器按钮，
+  绝不静默失败"。当前实现只做到"明确提示失败原因"（Toast 显示具体原因），
+  没有提供"用系统里其它播放器打开"的按钮——它需要新增设置项与 `shell.openPath` 接线，
+  属新功能而非缺陷修复，未在本轮夹带；
+- **边转边播（P3）**、多音轨选择、内嵌字幕烧录：开发报告已列为"未做（有意）"。
 
 ### v1.7.0——启动体感优化 + 严重时序 BUG 修复 + 安全加固 + 性能收敛
 
@@ -906,8 +1197,24 @@ Electron 真实启动冒烟测试零报错。
 
 #### C. 质量保障手段（自动化项以仓库现存文件为准）
 
-- `node --check main.js preload.js renderer.js shared-video-exts.js verify-exts.js` 语法门禁；
+- 语法门禁必须**逐个文件**跑：`node --check` 只会检查第一个文件参数，写成
+  `node --check main.js preload.js …` 时后面几个文件其实是被忽略的"假通过"。
+  Windows PowerShell 写法（新增 JS 文件时**必须同步加进这个清单**）：
+  `Get-ChildItem main.js,preload.js,renderer.js,converter.js,shared-video-exts.js,shared-subtitle-exts.js,verify-exts.js,verify-converter.js,verify-renderer.js,verify-wiring.js | ForEach-Object { node --check $_.FullName }`；
 - `node verify-exts.js`：扩展名一致性对账（`shared-video-exts.js` ↔ `package.json` 的 `build.fileAssociations`）；
+- `node verify-converter.js`：转换层自检（判定规则单测 + 可选真实样本对账与转换冒烟，见第 20 节）；
+- `node verify-renderer.js`：渲染层无界面自检。用 Node `vm` + 一套 DOM/Electron 桩**真实执行
+  `renderer.js` 顶层脚本**并驱动其事件回调，覆盖：顶层求值无异常（专盯暂时性死区 TDZ 这类
+  静默失效）、设置恢复链路跑完整、字幕解析（真实世界的畸形写法）与加载、播放列表增删与索引维护、
+  播放失败熔断与自动跳集、纯音频音乐模式判定与误判自愈、均衡器暂停指示的作用域、
+  运行时兜底的令牌防竞态、进度条在时长不可用时不写入无效值。
+  **凡是改 renderer.js 的行为，都应在这里补一条能抓住它的断言**；
+- `node verify-wiring.js`：端到端接线对账。本项目是"零构建" Electron 应用，主进程 / preload /
+  渲染进程 / 打包清单 / HTML 之间的契约全靠手写字符串对齐，没有类型系统或打包器帮忙检查，
+  对不上的症状往往是运行时静默失效（调不存在的 API、监听永不发送的通道、打包漏文件）。
+  这一条把五组契约机器化：打包必需文件齐全、主进程本地依赖可解析、renderer 调用的 API 全部
+  已在 preload 暴露、IPC 通道发/收双向对账、HTML 引用的本地资源存在；
+- `npm run verify` 串起上面四个脚本（顺序执行，任一失败即非零退出）。
 - 曾用 `puppeteer-core` + 注入 stub `electronAPI` 的临时 HTML 页面做无头浏览器回归
   （真实鼠标/拖拽事件），临时页测后即删，**未保留入库**（历史尝试，勿当作现存能力）。
 
@@ -929,5 +1236,6 @@ npm install
 npm run build
 ```
 
-打包产物三件套：NSIS 安装版 exe、portable 便携版 exe、latest.yml（供更新检查）。
+打包产物为两个 exe：NSIS 安装版 exe（`BBPlayer Setup <版本>.exe`）与 portable 便携版 exe
+（`BBPlayer <版本>.exe`）。`publish` 为 `null`，不生成更新清单、不做自动更新。
 `release-dist/` 已被 .gitignore 排除，勿将构建产物提交进仓库。

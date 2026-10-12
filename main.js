@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { pathToFileURL } = require('url');   // 本地路径转 file:// URL（仅 file:findCover 使用）
 
 // === 主进程兜底：未捕获异常不再让整个播放器直接崩溃退出 ===
 // 播放器是长驻的单窗口应用，任何一处 IPC 回调意外抛错都不该带走用户正在看的视频；
@@ -35,6 +36,17 @@ function showMainWindow() {
 const VIDEO_EXTS = require('./shared-video-exts');
 const SUBTITLE_EXTS = require('./shared-subtitle-exts'); // 字幕扩展名单一来源（与渲染端共享）
 const videoExtensions = new Set(VIDEO_EXTS.all.map(ext => '.' + ext));
+
+// === 媒体兼容层：内置 FFmpeg，把内核打不开的格式（avi/flv/wmv/ts/rmvb/rm/mpg/mpeg/m2ts/vob/m2v）
+// 三档处理后喂给同一个 <video>：能播就不动、只差容器就换壳（秒级）、编码不行才重编码。
+// 决策规则与实测数据见 docs/FORMAT-EXPANSION-REPORT.md；缺 ffmpeg 时自动降级（这些文件仍会播失败并如实提示）。
+const converter = require('./converter');
+converter.configure({
+  ffmpegPath: app.isPackaged
+    ? path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe')   // 打包后由 extraResources 放到 resources/ffmpeg
+    : path.join(__dirname, 'vendor', 'ffmpeg', 'ffmpeg.exe'),
+  cacheDir: path.join(app.getPath('temp'), 'BBPlayer-convert')
+});
 
 // 解析命令行/"打开方式"传入的媒体文件路径（支持一次多个文件，按序返回绝对路径数组）。
 // Windows 下开发环境 Electron 命令行参数通常为：[electron.exe, ., path/to/file]
@@ -92,6 +104,18 @@ function loadWindowState() {
           delete state.x;
           delete state.y;
         }
+      }
+      // 尺寸也必须钳进当前工作区：本软件是 frame:false 的无边框窗口，最小化/最大化/关闭
+      // 三个按钮都画在窗口右上角（DOM 自绘，不是系统标题栏）。若存档来自更大的显示器
+      // （例如 4K 屏存了 3000×1600，之后用 1080p 笔记本启动），窗口会比屏幕宽出一大截，
+      // 右上角按钮整体落在屏幕外 —— 用户就**关不掉也拖不动**这个窗口。
+      // 可见区校验只管"左上角那一片还在不在"，管不住这个，所以这里单独钳一次。
+      if (typeof state.x === 'number' && typeof state.y === 'number') {
+        const wa = screen.getDisplayMatching({ x: state.x, y: state.y, width: state.width, height: state.height }).workArea;
+        state.width = Math.max(480, Math.min(state.width, wa.width));
+        state.height = Math.max(320, Math.min(state.height, wa.height));
+        state.x = Math.min(Math.max(state.x, wa.x), wa.x + wa.width - state.width);
+        state.y = Math.min(Math.max(state.y, wa.y), wa.y + wa.height - state.height);
       }
       return state;
     }
@@ -158,6 +182,7 @@ function createPlayerWindow(options = {}) {
   win.on('closed', () => {
     playerWindows.delete(win);
     if (isMain) mainWindow = null;
+    converter.invalidate(String(win.id)); // 窗口关了，它正在跑的转换立刻停掉
   });
 
   win.loadFile('index.html');
@@ -266,7 +291,18 @@ function isTrustedSender(event) {
 // 软件准备就绪
 app.whenReady().then(() => {
   mainWindow = createPlayerWindow({ isMain: true });
+  // 启动时清一次缓存（残留的 .part.mp4 碎片 + 超过上限的旧产物），失败不影响使用
+  converter.cleanup(true);
+  converter.isAvailable().then((ok) => {
+    if (!ok) {
+      console.warn('[BBPlayer] 未找到内置转换器，avi/flv/wmv/ts/rmvb 等格式将无法播放：', converter.ffmpegPath());
+    }
+  });
 });
+
+// 退出前杀掉正在跑的 ffmpeg，避免留下孤儿进程一直占 CPU
+app.on('before-quit', () => converter.killActive());
+process.on('exit', () => converter.killActive());
 
 app.on('window-all-closed', () => {
   // 所有窗口关闭即退出软件（主窗口点"关闭"或最后一个窗口关掉都走这里）
@@ -316,32 +352,88 @@ ipcMain.handle('window:isFullScreen', (event) => {
 const MAX_PLAYER_WINDOWS = 16;
 
 // 在独立新窗口播放指定视频（多视频同时播放的核心入口）
-ipcMain.on('window:openInNewWindow', (event, filePath) => {
+ipcMain.on('window:openInNewWindow', async (event, filePath) => {
   if (!isTrustedSender(event)) return;
   if (playerWindows.size >= MAX_PLAYER_WINDOWS) return;
-  if (typeof filePath !== 'string' || !filePath) return;
-  const abs = path.resolve(filePath);
-  const ext = path.extname(abs).toLowerCase();
-  if (!videoExtensions.has(ext) || !fs.existsSync(abs)) return;
+  // 异步校验：同步 existsSync 会阻塞主进程（多窗口下等于卡住所有窗口）
+  const abs = await resolveMediaPath(filePath);
+  if (!abs) return;
+  if (playerWindows.size >= MAX_PLAYER_WINDOWS) return; // 等待校验期间可能已开满
   createPlayerWindow({ isMain: false, initialFile: abs });
 });
 
-// 本地路径转 file:// URL（沙箱 preload 的 url 模块无 pathToFileURL，由主进程用完整标准库转换）
-const { pathToFileURL } = require('url');
-
-ipcMain.handle('path-to-url', (event, filePath) => {
-  let url = '';
-  if (isTrustedSender(event) && typeof filePath === 'string' && filePath) {
-    // 与 window:openInNewWindow 一致的白名单 + 存在性校验：只允许把受支持的媒体文件转成 file:// URL
-    const ext = path.extname(filePath).toLowerCase();
-    if (!videoExtensions.has(ext) || !fs.existsSync(filePath)) return '';
-    try {
-      url = pathToFileURL(filePath).href;
-    } catch (err) {
-      console.warn('pathToFileURL 转换失败:', filePath, err);
-    }
+// === 媒体兼容层 IPC ===
+// 给一个本地媒体路径，返回"可以直接喂给 <video> 的 URL"：
+//   · 原生可播的扩展名 → 原样返回（不探测、不转换，常用格式零额外开销）
+//   · 需要转换的扩展名 → 先探测再按档位转换（换容器/换音频/重编码），进度经 media:convert-progress 回传
+//   · 失败/取消 → 返回空串，由渲染进程走既有的"无法解析媒体源"提示
+//
+// 入参校验一律异步（fs.promises）：同步 existsSync 会阻塞主进程事件循环，
+// 多窗口并存时等于把所有窗口的按钮与 IPC 一起卡住（与 file:findCover 同一纪律）。
+async function resolveMediaPath(filePath) {
+  if (typeof filePath !== 'string' || !filePath) return '';
+  const abs = path.resolve(filePath);
+  if (!videoExtensions.has(path.extname(abs).toLowerCase())) return '';
+  try {
+    const st = await fs.promises.stat(abs);
+    if (!st.isFile()) return '';
+  } catch (e) {
+    return ''; // 不存在或不可读
   }
-  return url;
+  return abs;
+}
+
+ipcMain.handle('media:prepare', async (event, filePath, force) => {
+  if (!isTrustedSender(event)) return '';
+  const win = windowOf(event);
+  if (!win) return '';
+  const abs = await resolveMediaPath(filePath);
+  if (!abs) return '';
+
+  const tier = (force === 'transcode' || force === 'audiofix') ? force : null;
+  const key = String(win.id);
+  // 同一窗口切换到别的文件 → 作废它上一次的转换（运行时兜底的强制请求不走这里，避免打断自己）
+  if (!tier) converter.invalidate(key);
+  // 先给界面一个即时反馈：转换可能要排队（全局并发 1），没有这条提示用户会以为"点了没反应"
+  if (!win.isDestroyed()) {
+    win.webContents.send('media:convert-progress', { percent: 0, tier: tier || 'auto', stage: 'prepare' });
+  }
+
+  try {
+    const result = await converter.prepare(abs, {
+      key,
+      force: tier,
+      onProgress: (p) => {
+        if (win.isDestroyed()) return;
+        win.webContents.send('media:convert-progress', {
+          percent: p.percent,
+          speed: p.speed,
+          // converter 探测出真实档位后会回传一次（含 'decided' 阶段），优先用它：
+          // 这样界面能显示"正在换容器"而不是笼统的"正在转换格式"
+          tier: p.tier || tier || 'auto',
+          stage: p.stage
+        });
+      }
+    });
+    return result.url;
+  } catch (err) {
+    if (err && err.name === 'CancelledError') return '';  // 用户换片/关窗：静默
+    console.warn('[BBPlayer] 媒体转换失败:', abs, err && err.message);
+    if (!win.isDestroyed()) {
+      win.webContents.send('media:convert-failed', { path: abs, message: (err && err.message) || '转换失败' });
+    }
+    return '';
+  }
+});
+
+// 查询文件的容器/编码信息（运行时兜底用它判断"该重编码还是只换音频"）
+ipcMain.handle('media:probe', async (event, filePath) => {
+  if (!isTrustedSender(event)) return null;
+  const abs = await resolveMediaPath(filePath);
+  if (!abs) return null;
+  const p = await converter.probeFile(abs);
+  if (!p) return null;
+  return { container: p.container, video: p.video, audio: p.audio, duration: p.duration, hasAudio: !!p.audio };
 });
 
 // 查找音频文件同目录的封面图：cover/folder 惯例命名 + 同名图片，命中返回可用的图片 URL，未命中返回 null。
@@ -371,7 +463,8 @@ ipcMain.handle('file:findCover', async (event, filePath) => {
       } catch (err) {
         continue; // 不存在或不可读，继续尝试下一个候选名
       }
-      if (!stat.isFile()) continue;
+      // 0 字节的坏图（下载失败/占位文件）必须跳过，否则它会把后面真正有效的候选封面顶掉
+      if (!stat.isFile() || stat.size === 0) continue;
       const mime = COVER_MIME[path.extname(p).toLowerCase()];
       if (mime && stat.size > 0 && stat.size <= MAX_COVER_BYTES) {
         try {
@@ -436,13 +529,19 @@ ipcMain.handle('dialog:openSubtitle', async (event) => {
 });
 
 // 打开整个文件夹，返回其中所有视频文件的绝对路径列表（支持安全深度递归）
-// 返回 { files, truncated }：truncated 表示达到 maxFiles 上限被截断，由渲染进程提示用户
+// 返回 { files, truncated }：truncated 表示结果不完整（数量触顶 或 目录嵌套超深），由渲染进程提示用户
 async function scanDirectorySafe(dirPath, maxDepth = 3, maxFiles = 500) {
   const collected = [];
   let truncated = false;
 
   async function walk(dir, depth) {
-    if (depth > maxDepth) return;
+    // 深度超限：这里**必须**标记 truncated。此前直接 return 什么都不说，
+    // 嵌套超过 4 层的目录里那些视频会静默消失，用户以为"这个文件夹就这些片子"，
+    // 而数量触顶（下面那段）却会如实提示 —— 两种"没扫全"应当一个待遇。
+    if (depth > maxDepth) {
+      truncated = true;
+      return;
+    }
     try {
       const entries = await fs.promises.readdir(dir, { withFileTypes: true });
       for (const entry of entries) {
@@ -524,7 +623,9 @@ function decodeSubtitleBuffer(buf) {
     try {
       return new TextDecoder('gbk').decode(buf);
     } catch (e2) {
-      return buf.toString('latin1'); // 终极兜底，至少不抛异常
+      // 终极兜底，至少不抛异常。必须先转 Buffer：Uint8Array#toString 会忽略编码参数、
+      // 返回 "228,189,160,…" 这种数字串（拖入字幕走的就是 Uint8Array 这条路径）
+      return Buffer.from(buf).toString('latin1');
     }
   }
 }
@@ -594,7 +695,7 @@ ipcMain.handle('dialog:saveScreenshot', async (event, payload) => {
       return false;
     }
   }
-  return false;
+  return null; // 用户取消：与"写盘失败(false)"区分开，否则渲染端把取消误报成保存失败
 });
 
 // 监听渲染进程发来的视频分辨率，动态调整窗口大小与锁定宽高比（消除黑边）
@@ -645,6 +746,14 @@ ipcMain.handle('resize-window-to-video', (event, payload) => {
   programmaticResizeWindows.add(win); // 程序化贴合尺寸：引发的 resize 不写进窗口状态记忆
   win.setAspectRatio(lockAspect ? aspectRatio : 0); // setAspectRatio(0) 取消锁定
   win.setSize(targetWidth, targetHeight);
+
+  // 贴合后必须仍完整落在工作区内：窗口原本贴着屏幕右/下边缘时，放大后会被推出屏幕、画面被裁掉。
+  // 仅在真的需要挪动时才 setPosition，避免多余的 move 事件把贴合尺寸写进窗口状态记忆。
+  const newX = Math.max(workArea.x, Math.min(currentBounds.x, workArea.x + workArea.width - targetWidth));
+  const newY = Math.max(workArea.y, Math.min(currentBounds.y, workArea.y + workArea.height - targetHeight));
+  if (newX !== currentBounds.x || newY !== currentBounds.y) {
+    win.setPosition(Math.round(newX), Math.round(newY));
+  }
   return true;
 });
 

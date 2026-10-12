@@ -1,24 +1,24 @@
 {
   "name": "bb-player",
-  "version": "1.7.0",
+  "version": "1.9.0",
   "description": "BBPlayer",
   "main": "main.js",
+  "author": "",
+  "license": "MIT",
   "scripts": {
     "start": "electron .",
     "build": "electron-builder --win",
-    "verify": "node verify-exts.js"
+    "verify": "node verify-exts.js && node verify-converter.js && node verify-renderer.js && node verify-wiring.js"
+  },
+  "devDependencies": {
+    "electron": "^44.7.0",
+    "electron-builder": "^26.17.0"
   },
   "keywords": [
     "player",
     "video",
     "electron"
   ],
-  "author": "",
-  "license": "MIT",
-  "devDependencies": {
-    "electron": "^34.2.0",
-    "electron-builder": "^25.1.8"
-  },
   "build": {
     "appId": "com.bb.player",
     "productName": "BBPlayer",
@@ -30,33 +30,43 @@
       "main.js",
       "preload.js",
       "renderer.js",
+      "converter.js",
       "index.html",
       "shared-video-exts.js",
       "shared-subtitle-exts.js",
       "package.json",
       "build/**/*"
     ],
+    "extraResources": [
+      {
+        "from": "vendor/ffmpeg",
+        "to": "ffmpeg",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
     "fileAssociations": [
       {
         "ext": [
           "mp4",
           "mkv",
-          "avi",
           "mov",
           "webm",
+          "m4v",
+          "3gp",
+          "ogv",
+          "f4v",
+          "avi",
           "flv",
           "wmv",
-          "m4v",
           "ts",
           "rmvb",
           "rm",
-          "3gp",
           "mpg",
           "mpeg",
           "m2ts",
           "vob",
-          "ogv",
-          "f4v",
           "m2v",
           "mp3",
           "flac",

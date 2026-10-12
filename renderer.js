@@ -3,7 +3,7 @@ if (!window.electronAPI) throw new Error('BBPlayer 必须在 Electron 环境中�
 
 // 媒体扩展名（单一事实来源 shared-video-exts.js / shared-subtitle-exts.js，经主进程 IPC 一次性获取）。
 // 异步获取足够安全：所有消费点（拖拽过滤、音频判断）都发生在用户交互之后。
-let mediaExtensions = { video: [], audio: [], all: [], subtitle: [] };
+let mediaExtensions = { video: [], convertibleVideo: [], audio: [], all: [], subtitle: [] };
 window.electronAPI.getVideoExtensions().then(list => {
   if (list && Array.isArray(list.all)) mediaExtensions = list;
 }).catch(() => {});
@@ -16,6 +16,33 @@ window.electronAPI.onOpenFile((filePath) => {
     // 而这恰好是文件关联双击的主路径。
     if (addFilesToPlaylist([filePath]) === 0) playExistingFile(filePath);
   }
+});
+
+// === 格式转换进度与失败提示（内置 ffmpeg 三档处理的对外反馈）===
+// 复用现有 Toast：转换期间 ffmpeg 会持续汇报进度（每秒多次），每次刷新都会把 Toast 的
+// 2.5 秒自动隐藏计时器推后，所以长转码期间提示会一直可见；转完由"已加载"提示接管。
+// 档位 → 提示文案（单一来源）。档位由主进程 converter 判定并回传，
+// 这里只负责翻译成人话：remux/audiofix 是秒级，transcode 要等，必须让用户一眼分清。
+const CONVERT_TIER_LABEL = {
+  remux: '正在换容器',
+  audiofix: '正在转换音频',
+  transcode: '正在重新编码'
+};
+
+window.electronAPI.onConvertProgress((p) => {
+  if (!p) return;
+  if (p.stage === 'prepare') { showToast('正在准备转换…'); return; }
+  // 探测阶段（stage==='decided'）就已经知道档位，此时还没开始转，
+  // 明确告诉用户这一档要不要等，避免以为卡住
+  const what = CONVERT_TIER_LABEL[p.tier] || '正在转换格式';
+  showToast(p.percent > 0 ? `${what}… ${p.percent}%` : `${what}…`);
+});
+window.electronAPI.onConvertFailed((info) => {
+  // 记下具体原因与文件路径：稍后 loadAndPlayVideo 会因为拿到空地址而走"无法解析媒体源"分支，
+  // 那条通用提示会把这里的具体原因盖掉，所以由下面那个分支优先使用（且只在路径对得上时用，
+  // 免得把"上一个文件的失败原因"错报给当前文件）。
+  lastConvertError = { path: (info && info.path) || null, message: (info && info.message) || '转换失败' };
+  showToast(`转换失败：${lastConvertError.message}`);
 });
 
 // 窗口最小化自动暂停（仅视频）与恢复（不弹提示：最小化时用户看不到 Toast，恢复时安静续播即可）
@@ -198,7 +225,7 @@ function initAudioPipeline() {
     compressor.connect(audioCtx.destination);
 
     audioPipelineReady = true;
-    console.log('[BBPlayer] 音频增益管线已就绪：音量支持 0%~200%，防破音已启用');
+    console.info('[BBPlayer] 音频增益管线已就绪：音量支持 0%~200%，防破音已启用');
     // 兜底激活调音台：部分自动播放策略下 AudioContext 会处于挂起状态
     if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
     return true;
@@ -266,6 +293,8 @@ function drawSpectrumFrame() {
     const bh = Math.max(3, v * H * 0.88);
     const x = i * (bw + gap);
     const hue = 190 + (i / barCount) * 80; // 190(青) → 270(紫)
+    // 渐变必须从柱顶 (H-bh) 起：矮柱才能"自己从头亮到尾"。试过缓存为固定 (0,0)-(0,H) 渐变，
+    // 结果安静段的 3px 基座柱落在渐变最暗端几乎不可见（视觉回归），故保留逐帧创建（GC 代价审计定级：可忽略）。
     const grad = ctx.createLinearGradient(0, H - bh, 0, H);
     grad.addColorStop(0, `hsla(${hue}, 95%, 66%, 0.95)`);  // 柱顶亮
     grad.addColorStop(1, `hsla(${hue}, 95%, 62%, 0.10)`);  // 柱底融入背景
@@ -560,6 +589,11 @@ let loadSequence = 0;
 // 连续播放失败集合（成功加载元数据时清空）；列表内所有条目都失败过才停止自动跳转
 let failedPlaylistKeys = new Set();
 
+// 最近一次"格式转换失败"的具体原因（缺 ffmpeg / 磁盘不足 / 文件损坏），带文件路径。
+// 放在文件顶部而非兜底代码块里：loadAndPlayVideo 会读它，而函数定义在兜底块之前，
+// 用 let 声明在后方会踩"暂时性死区"（TDZ）——本项目此前已因同类问题踩过一次坑。
+let lastConvertError = null;   // { path, message }
+
 function clearAutoNextTimer() {
   if (autoNextTimer) {
     clearTimeout(autoNextTimer);
@@ -568,10 +602,20 @@ function clearAutoNextTimer() {
 }
 
 // === 核心：通用视频加载与播放函数 (双重保险机制) ===
+// 历史续播检查的临时监听器单例：loadAndPlayVideo 每次加载注册一对
+// loadedmetadata/error 监听器，被打断的旧对必须被新加载先卸下（见函数内注释）
+let historyMetaListeners = null;
+
 async function loadAndPlayVideo(filePathOrFile) {
   if (!filePathOrFile) return;
 
   const seq = ++loadSequence; // 本次加载的令牌
+
+  // 一进来就作废上一条视频的兜底状态：下面的 await 可能要等几分钟（新片需要转换），
+  // 期间旧片的定时器若照旧触发，就会对旧片白跑一次完整重编码，甚至把正在加载的新片劫持掉。
+  if (noPictureTimer) { clearTimeout(noPictureTimer); noPictureTimer = null; }
+  if (audioCheckTimer) { clearTimeout(audioCheckTimer); audioCheckTimer = null; }
+  pendingRestoreTime = 0;
 
   let targetSrc = '';
   let fileName = '';
@@ -582,7 +626,9 @@ async function loadAndPlayVideo(filePathOrFile) {
     fullPath = filePathOrFile;
     fileName = filePathOrFile.split(/[\\/]/).pop();
     hasRealPath = true;
-    targetSrc = await window.electronAPI.toFileUrl(fullPath);
+    // 经兼容层取播放地址：原生格式原样返回；内核打不开的格式会先转换好再返回产物地址。
+    // 注意 fullPath 始终是"原始文件"——标题/历史/续播/同名字幕都靠它，绝不能换成临时产物路径。
+    targetSrc = await window.electronAPI.prepareMedia(fullPath);
   } else if (filePathOrFile instanceof File) {
     fileName = filePathOrFile.name;
     // 从原生 API 提取物理路径（失败时返回空串，走 Blob 播放）
@@ -591,7 +637,7 @@ async function loadAndPlayVideo(filePathOrFile) {
     if (extractedPath) {
       fullPath = extractedPath;
       hasRealPath = true;
-      targetSrc = await window.electronAPI.toFileUrl(extractedPath);
+      targetSrc = await window.electronAPI.prepareMedia(extractedPath);
     } else {
       // 降级双保险：URL.createObjectURL(file) 内存直接播放（无物理路径，不记历史）
       revokeCurrentBlobUrl();
@@ -604,14 +650,28 @@ async function loadAndPlayVideo(filePathOrFile) {
   // 异步等待期间用户已切换到其他视频：本次加载整体作废，避免旧状态覆盖新视频
   if (seq !== loadSequence) return;
 
+  // 每个文件"每次播放"允许运行时兜底一次（上次兜底过≠这次也不行；
+  // 而且已经转好的产物会被主进程直接复用，不会重复劳动）
+  if (hasRealPath && fullPath) convertFallbackTried.delete(fullPath);
+
   if (!targetSrc) {
-    // 源解析失败（文件已被删除 / 扩展名不受支持等）：本次切换其实没有真正发生，
+    // 源解析失败（文件已被删除 / 扩展名不受支持 / 转换失败等）：本次切换其实没有真正发生，
     // 把列表索引与高亮回滚到切换前的条目，避免"高亮指着 A、实际还在播 B"的错位状态
     currentPlaylistIndex = playlistIndexBeforeSwitch;
     renderPlaylist();
-    showToast(`无法解析媒体源：${fileName}`);
+    // 转换失败时用它报出的具体原因（缺 ffmpeg / 磁盘不足 / 文件损坏），别用笼统的"无法解析媒体源"。
+    // 必须核对路径：失败原因可能来自上一条视频，错报会把人带偏。
+    const sameFile = lastConvertError && lastConvertError.path &&
+      lastConvertError.path.toLowerCase() === String(fullPath).toLowerCase();
+    if (sameFile) {
+      showToast(`转换失败：${lastConvertError.message}`);
+    } else {
+      showToast(`无法解析媒体源：${fileName}`);
+    }
+    lastConvertError = null;
     return;
   }
+  lastConvertError = null;   // 成功加载，清掉上一次的转换失败原因
 
   // 若目标不是新创建的 Blob，释放旧的 Blob 资源
   if (targetSrc !== currentBlobUrl) {
@@ -624,6 +684,7 @@ async function loadAndPlayVideo(filePathOrFile) {
 
   // 重置字幕状态（新视频不沿用上一部的字幕）
   currentSubtitleData = [];
+  manualSubtitleFor = null; // 换片后清掉"手动字幕优先"标记，否则新片永远不会自动加载同名字幕
   if (customSubtitle) customSubtitle.style.display = 'none';
   lastRenderedSubText = null; // 清空缓存文案，否则新片首句若与上一部末句同文会被判为"无需重绘"而漏显
 
@@ -676,7 +737,14 @@ async function loadAndPlayVideo(filePathOrFile) {
   // 带令牌校验，避免旧视频的续播检查误应用到新视频；加载失败时也要清理，防止监听器累积
   if (hasRealPath) {
     const resumeToken = fullPath;
+    // 单例注册：换 src 打断旧加载时只触发 emptied/abort（不触发本对监听器），
+    // 旧对若不主动卸下会永久累积（实测 20 次连切泄漏 40 个）。新加载先卸旧对，任何时刻至多 1 对在挂。
+    if (historyMetaListeners) {
+      video.removeEventListener('loadedmetadata', historyMetaListeners.onMeta);
+      video.removeEventListener('error', historyMetaListeners.onError);
+    }
     const cleanup = () => {
+      if (historyMetaListeners && historyMetaListeners.onMeta === onMeta) historyMetaListeners = null;
       video.removeEventListener('loadedmetadata', onMeta);
       video.removeEventListener('error', onError);
     };
@@ -685,18 +753,23 @@ async function loadAndPlayVideo(filePathOrFile) {
       if (currentFilePath === resumeToken) checkHistoryResume(resumeToken);
     };
     const onError = () => cleanup();
+    historyMetaListeners = { onMeta, onError };
     video.addEventListener('loadedmetadata', onMeta);
     video.addEventListener('error', onError);
   }
 }
 
-// 通过主进程读取字幕文件（避免 fetch file:// 的路径编码与 CORS 问题）
+// 通过主进程读取字幕文件（避免 fetch file:// 的路径编码与 CORS 问题）。
+// 只负责"读 + 令牌校验 + 应用"；"手动优先"是**自动加载独有的策略**，放在
+// checkAndAutoLoadSubtitles 里判断——此前它被写在本函数内，导致从菜单手动选字幕
+// （同样走本函数、expectedVideoPath 正是当前视频）被当成"自动加载"静默拒绝，
+// 用户看到的是"加载字幕文件失败"，且此后再也无法通过菜单换字幕。
 async function loadSubtitleFromPath(filePath, expectedVideoPath) {
   if (!filePath) return false;
   try {
     const text = await window.electronAPI.readTextFile(filePath);
     if (text) {
-      // 自动加载场景下校验视频未切换，避免旧视频的字幕覆盖新视频
+      // 校验视频未切换，避免对话框/读取期间切了片，旧字幕覆盖到新视频上
       if (expectedVideoPath && currentFilePath !== expectedVideoPath) return false;
       parseAndApplySubtitle(text);
       return true;
@@ -709,6 +782,9 @@ async function loadSubtitleFromPath(filePath, expectedVideoPath) {
 
 // 检查同名本地字幕（依次尝试 .srt / .vtt / .ass / .ssa，扩展名来自 IPC 下发的单一来源）
 async function checkAndAutoLoadSubtitles(basePath) {
+  // 用户手动给这个视频配过字幕（拖入或菜单选择）→ 同名字幕自动加载一律让位，
+  // 否则用户精心调好的字幕会被同目录下那个同名的破字幕顶掉
+  if (manualSubtitleFor && manualSubtitleFor === currentFilePath) return;
   const videoKey = currentFilePath; // 发起时的视频路径（令牌）
   for (const ext of mediaExtensions.subtitle.map(e => '.' + e)) {
     try {
@@ -839,11 +915,14 @@ if (btnNewWindow) {
 // 视频 URL 转换与字幕文件解码都是异步的，先后顺序不定，
 // 因此双方完成后各自查登记表，谁后到谁触发应用（事件驱动，避免轮询与竞态）
 let pendingDropSubtitle = null;
+// 已被用户手动拖入的字幕所对应的视频路径：同名字幕自动加载不得把它覆盖掉（手动优先）
+let manualSubtitleFor = null;
 
 // 尝试应用登记中的字幕：仅当字幕文本已解码且当前播放的正是配套视频时生效
 function tryApplyPendingDropSubtitle() {
   if (!pendingDropSubtitle || !pendingDropSubtitle.text) return;
   if (currentFilePath !== pendingDropSubtitle.forVideo) return;
+  manualSubtitleFor = pendingDropSubtitle.forVideo; // 手动拖入优先：此后同名自动加载一律跳过
   parseAndApplySubtitle(pendingDropSubtitle.text);
   showToast('已加载拖入的字幕');
   pendingDropSubtitle = null;
@@ -851,6 +930,9 @@ function tryApplyPendingDropSubtitle() {
 
 // 拖入字幕文件：读 ArrayBuffer 后交主进程按编码嗅探解码（与 readText 路径共用同一实现），避免 GBK 字幕按 UTF-8 读出乱码
 function loadDraggedSubtitle(file, forVideoKey) {
+  // 纯拖字幕路径在解码后才应用到"当前"画面，而两次 await 之间用户可能已换片。
+  // 入口记下发起时的视频，应用前核对；混拖路径由 tryApplyPendingDropSubtitle 按登记路径核对，无需重复。
+  const startVideoPath = forVideoKey ? null : currentFilePath;
   file.arrayBuffer().then((buf) => {
     return window.electronAPI.decodeSubtitleBuffer(buf).then((text) => {
       if (forVideoKey) {
@@ -858,8 +940,9 @@ function loadDraggedSubtitle(file, forVideoKey) {
         // 无条件覆盖旧登记：旧登记未被应用说明配套视频已被切走或字幕损坏，已无保留价值
         pendingDropSubtitle = { forVideo: forVideoKey, text };
         tryApplyPendingDropSubtitle();
-      } else if (text) {
-        // 仅拖字幕：直接应用到当前画面
+      } else if (text && startVideoPath === currentFilePath) {
+        // 仅拖字幕：解码期间没换片才应用（换了就丢弃，绝不挂到新视频上）
+        manualSubtitleFor = currentFilePath; // 手动拖入优先
         parseAndApplySubtitle(text);
         showToast('已加载拖入的字幕');
       }
@@ -910,7 +993,9 @@ window.addEventListener('drop', (e) => {
   if (videoFiles.length > 0) {
     // 记录第一个视频的唯一 key：若它随后被自动播放，配套字幕才能安全应用
     const firstVideoKey = window.electronAPI.getFilePath(videoFiles[0]) || videoFiles[0].name;
-    addFilesToPlaylist(videoFiles);
+    // 去重命中（文件已在列表中）时也要有反应：直接切过去播放。否则拖一个"列表里已有"的
+    // 视频进来会毫无动静，用户以为卡死（与对话框、双击关联文件两条路径保持一致）
+    if (addFilesToPlaylist(videoFiles) === 0) playExistingFile(firstVideoKey);
 
     if (subtitleFiles.length > 0) {
       loadDraggedSubtitle(subtitleFiles[0], firstVideoKey);
@@ -921,7 +1006,12 @@ window.addEventListener('drop', (e) => {
   // 仅拖入字幕：直接应用到当前播放画面
   if (subtitleFiles.length > 0) {
     loadDraggedSubtitle(subtitleFiles[0], null);
+    return;
   }
+
+  // 视频与字幕都不匹配（例如拖入内核不支持的 avi/rmvb/flv 等）：必须给出反馈，
+  // 否则"拖进去毫无反应"，用户会以为软件卡死（与上方文件夹为空时的提示保持一致）
+  showToast(`不支持的文件格式：${files[0].name}`);
 });
 
 // === 播放列表管理功能 ===
@@ -979,9 +1069,30 @@ function renderPlaylist() {
     return;
   }
 
-  // DocumentFragment 批量构建后一次性挂载，避免大列表逐条插入造成的多次回流
+  // 增量追加路径：已有条目节点数与 playlist 前段一一对应时，只 append 新增条目。
+  // 全量重建（innerHTML=''）会把已有节点全部拆掉重建：大列表追加时秒级卡顿
+  // （每条目 10 个节点 + 3 段 SVG 字符串重复解析），且已挂的 active/is-paused 全靠重挂。
+  const existingCount = playlistItemsContainer.children.length;
+  if (existingCount > 0 && existingCount <= playlist.length) {
+    const firstChild = playlistItemsContainer.children[0];
+    if (firstChild && firstChild.classList && firstChild.classList.contains('playlist-item')) {
+      appendPlaylistItems(existingCount);
+      syncPlaylistPauseIndicator(); // 追加后重挂起停状态（新条目无标记，老条目已带）
+      return;
+    }
+  }
+
+  // 全量重建（清空/删除/初始化/占位符残留）：DocumentFragment 批量构建后一次性挂载
+  playlistItemsContainer.innerHTML = '';
+  appendPlaylistItems(0);
+  syncPlaylistPauseIndicator(); // 重建后重挂均衡器起停状态（新条目上没有任何标记）
+}
+
+// 构建并挂载 playlist[fromIndex..] 的条目节点到列表容器
+function appendPlaylistItems(fromIndex) {
   const frag = document.createDocumentFragment();
-  playlist.forEach((item, index) => {
+  for (let index = fromIndex; index < playlist.length; index++) {
+    const item = playlist[index];
     const div = document.createElement('div');
     div.className = `playlist-item ${index === currentPlaylistIndex ? 'active' : ''}`;
     div.dataset.index = String(index);
@@ -1018,9 +1129,7 @@ function renderPlaylist() {
     div.appendChild(newWinBtn);
     div.appendChild(removeBtn);
     frag.appendChild(div);
-  });
-
-  playlistItemsContainer.innerHTML = '';
+  }
   playlistItemsContainer.appendChild(frag);
 }
 
@@ -1060,6 +1169,8 @@ function deleteHistoryEntry(pathKey) {
   try {
     const history = loadHistory();
     delete history[pathKey];
+    // 正在播的这一条还要"抑制打卡"：否则 5 秒定时保存会立刻把它写回历史，删除变成假成功
+    if (pathKey === currentFilePath) historySuppressedKey = pathKey;
     localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
     showToast('已删除该条观看历史');
   } catch (e) {
@@ -1147,7 +1258,7 @@ if (historyViewBtn) {
 // 将播放器重置为空状态（播放列表由调用方清空）
 function resetPlayerToEmpty() {
   clearAutoNextTimer(); // 挂起的"1秒后自动切集"必须作废，防止清空后误播新加入的视频
-  loadSequence++; // 作废所有挂起的异步加载：await toFileUrl 期间清空播放器，旧调用不得回填（防止"清空后旧视频复活"）
+  loadSequence++; // 作废所有挂起的异步加载：await prepareMedia（取播放地址，可能含转码）期间清空播放器，旧调用不得回填（防止"清空后旧视频复活"）
   currentPlaylistIndex = -1;
   hasRealPath = false;
   currentFilePath = '';
@@ -1155,6 +1266,11 @@ function resetPlayerToEmpty() {
   pendingResumeTime = 0;
   lastSavedProgressSec = -1;
   failedPlaylistKeys.clear(); // 播放器清空即解除全部"播放失败"拉黑（列表已不存在，标记失去意义）
+  // 兜底状态一并清掉：否则清空播放器后旧片的兜底结果回来，会把已清空的播放器重新绑上旧文件
+  if (noPictureTimer) { clearTimeout(noPictureTimer); noPictureTimer = null; }
+  if (audioCheckTimer) { clearTimeout(audioCheckTimer); audioCheckTimer = null; }
+  pendingRestoreTime = 0;
+  lastConvertError = null;
   revokeCurrentBlobUrl();
   if (customSubtitle) customSubtitle.style.display = 'none';
   lastRenderedSubText = null; // 清空缓存文案：否则换片后首句若与上一部末句同文会被判为"无需重绘"而漏显
@@ -1211,6 +1327,7 @@ function playPlaylistItem(index) {
   if (playlistView === 'list' && items.length === playlist.length) {
     if (prevIndex >= 0 && items[prevIndex]) items[prevIndex].classList.remove('active');
     if (items[index]) items[index].classList.add('active');
+    syncPlaylistPauseIndicator(); // 轻量高亮路径不重建 DOM，起停状态要跟着挪到新条目
   } else {
     renderPlaylist();
   }
@@ -1262,6 +1379,7 @@ if (video) {
       }
 
       autoNextTimer = setTimeout(() => {
+        if (playMode === 'single-loop') return; // 这 1 秒内用户改成了单个循环：不该再切走
         if (nextIndex >= 0 && nextIndex < playlist.length) {
           playPlaylistItem(nextIndex);
         }
@@ -1310,9 +1428,27 @@ if (playlistBtn && playlistPanel) {
   });
 }
 
+// 均衡器"播放中跳动 / 暂停静止"指示：只作用于当前正在播放的那一条。
+// 列表重建（renderPlaylist）与切换条目（playPlaylistItem 轻量高亮路径）后都要重挂，
+// 否则重建出来的新条目上没有任何 is-paused 标记，暂停时均衡器依旧在空转。
+function syncPlaylistPauseIndicator() {
+  if (!playlistItemsContainer) return;
+  const paused = !(video && !video.paused);
+  const items = playlistItemsContainer.children;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (!item || !item.classList) continue;
+    const isActive = item.classList.contains('active');
+    if (isActive) item.classList.toggle('is-paused', paused);
+    else item.classList.remove('is-paused');
+  }
+}
+
 function updatePlayPauseUI(isPlaying) {
-  // 播放列表"正在播放"均衡器指示随播放状态起停
-  if (playlistItemsContainer) playlistItemsContainer.classList.toggle('is-paused', !isPlaying);
+  // 播放列表"正在播放"均衡器指示随播放状态起停。
+  // 只标在**当前条目**上而非整个列表容器：挂容器上会让列表里每条（500 条 = 1500 个
+  // 子元素）的动画样式全部重算，而其中只有 active 那条真正在动。
+  syncPlaylistPauseIndicator();
   if (playPauseBtn) {
     const playIcon = playPauseBtn.querySelector('#icon-play-state');
     if (playIcon) {
@@ -1474,9 +1610,110 @@ video.addEventListener('timeupdate', () => {
   renderSubtitlesAt(current);
 });
 
+// === 运行时兜底：探测说"能播"、内核实际却播不出画面/声音时，自动改走转换 ===
+// 为什么必须有它（而不是只靠扩展名/编码判定）：这几种情况真实存在——
+//   · mp4 里装 Xvid（外壳合法、画面编码内核不认）→ 有声音没画面
+//   · MKV 装 DTS/AC3 音轨 → 有画面没声音（实测音频解码字节恒为 0）
+//   · HEVC 但本机没有可用硬件解码、10bit / hvc1 标签异常 → 黑屏或只有声音
+// 每个文件只兜底一次，避免"转完还是不行 → 再转"的来回折腾。
+const convertFallbackTried = new Set();
+let noPictureTimer = null;
+let audioCheckTimer = null;
+let pendingRestoreTime = 0;   // 兜底换源后要恢复的观看位置
+
+function mediaExtOf(p) {
+  if (!p) return '';
+  const dot = p.lastIndexOf('.');
+  const sep = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  return dot > sep ? p.substring(dot + 1).toLowerCase() : '';
+}
+
+async function tryConvertFallback(tier) {
+  if (!currentFilePath || !hasRealPath || !isVideoLoaded) return;
+  if (convertFallbackTried.has(currentFilePath)) return;
+  // 只对本软件支持的媒体扩展名兜底（避免对奇怪输入弹"正在重新编码"却什么也不做）
+  if (!mediaExtensions.all.includes(mediaExtOf(currentFilePath))) return;
+  if (typeof window.electronAPI.prepareMedia !== 'function') return;
+
+  // 记下"这次是为哪个文件、哪次加载"，await 回来必须核对：
+  // 转换可能等几分钟，期间用户完全可能已经切到别的片子或清空了播放器。
+  const myFile = currentFilePath;
+  const mySeq = loadSequence;
+  convertFallbackTried.add(myFile);
+  pendingRestoreTime = video.currentTime > 2 ? video.currentTime : 0;
+  showToast(tier === 'audiofix' ? '该文件音轨内核不支持，正在转换音频…' : '该文件画面内核不支持，正在重新编码…');
+  try {
+    const url = await window.electronAPI.prepareMedia(myFile, tier);
+    // 已经不是同一部片/同一次加载了 → 这次结果直接丢弃，绝不能去改播放器
+    if (myFile !== currentFilePath || mySeq !== loadSequence || !isVideoLoaded) return;
+    if (!url) {
+      lastConvertError = { path: myFile, message: '转换未产出可用文件' };
+      pendingRestoreTime = 0;
+      return;
+    }
+    video.src = url;               // 只换播放源：标题/历史/续播/字幕仍认原始文件路径
+    video.load();
+  } catch (err) {
+    if (myFile === currentFilePath) {
+      lastConvertError = { path: myFile, message: (err && err.message) || '转换失败' };
+      pendingRestoreTime = 0;
+    }
+    console.warn('兜底转换失败:', err);
+  }
+}
+
+// 画面兜底：号称是视频却拿不到画面尺寸。先问一句"这文件里到底有没有视频轨"——
+// 只有音轨的 mp4/mkv（音乐抓轨、抽音轨产物）扩展名不在音频名单里，
+// 光看扩展名会把它们误当成"画面解不出"而白跑一次重编码，还永远进不了音乐模式。
+function scheduleNoPictureCheck() {
+  if (noPictureTimer) clearTimeout(noPictureTimer);
+  noPictureTimer = setTimeout(async () => {
+    noPictureTimer = null;
+    if (!isVideoLoaded || !currentFilePath) return;
+    if (video.videoWidth || video.videoHeight) { exitMusicMode(); return; }
+
+    const myFile = currentFilePath;
+    const mySeq = loadSequence;
+    const asMusic = () => {
+      const displayName = myFile.split(/[\\/]/).pop().replace(/\.[^.]+$/, '') || '';
+      enterMusicMode(myFile, displayName);
+    };
+    if (isAudioExt(myFile)) { asMusic(); return; }
+
+    const info = await window.electronAPI.probeMedia(myFile).catch(() => null);
+    if (myFile !== currentFilePath || mySeq !== loadSequence) return;   // 期间换片了
+    if (info && info.video === null) { asMusic(); return; }             // 根本没有视频轨 → 当音乐放
+    tryConvertFallback('transcode');
+  }, 1200);
+}
+
+// 声音兜底：画面正常、却一个音频字节都没解出来，而文件里确实有音轨 → 只换音频
+function scheduleAudioCheck() {
+  if (audioCheckTimer) clearTimeout(audioCheckTimer);
+  const scheduledSeq = loadSequence;   // 安排时刻的加载序号：同路径重新加载（失败跳回/清空重开）后，旧检查整体作废
+  audioCheckTimer = setTimeout(async () => {
+    audioCheckTimer = null;
+    if (scheduledSeq !== loadSequence) return;   // 已是新的一次加载 → 不再探测旧安排
+    if (!isVideoLoaded || !currentFilePath || isMusicMode) return;
+    if (video.paused || video.currentTime < 1) return;
+    if (!video.videoWidth) return;                                   // 画面问题交给上面那条
+    if (typeof video.webkitAudioDecodedByteCount !== 'number') return;
+    if (video.webkitAudioDecodedByteCount > 0) return;
+    if (convertFallbackTried.has(currentFilePath)) return;
+    const myFile = currentFilePath;
+    const mySeq = loadSequence;   // 同路径重新加载（失败跳回/清空重开）也算新的一次加载
+    const info = await window.electronAPI.probeMedia(myFile).catch(() => null);
+    if (myFile !== currentFilePath || mySeq !== loadSequence || !isVideoLoaded) return;   // 探测期间换片/重载了 → 别动新片
+    if (!info || !info.hasAudio) return;                             // 本来就没有音轨 → 不折腾
+    tryConvertFallback('audiofix');
+  }, 3000);
+}
+
 // 新视频加载完成时重置进度显示（避免残留上一视频的进度）并触发窗口适应视频比例
 video.addEventListener('loadedmetadata', () => {
-  failedPlaylistKeys.clear(); // 成功加载，清空失败记录
+  // 只解除"当前文件"的失败标记。若像以前那样 clear() 整个集合，两个"能读出时长、中途解码报错"的
+  // 坏文件会互相把对方的标记清掉，"全部失败过才停止"的熔断永远达不到 → 每 1.5 秒来回切换停不下来。
+  failedPlaylistKeys.delete(currentFilePath);
   // 换源后 Chromium 会将倍速重置为 1.0，元数据就绪时重新应用用户设置
   video.playbackRate = currentSpeed;
   if (progressContainer) progressContainer.style.setProperty('--progress', '0%');
@@ -1491,12 +1728,24 @@ video.addEventListener('loadedmetadata', () => {
     }).catch(err => console.warn('窗口自适应失败:', err));
   }
 
-  // 纯音频判定：无视频轨时 videoWidth/videoHeight 为 0（实测确认），切换音乐播放效果模式
+  // 兜底换源后回到原来的观看位置（避免自动重编码后从头开始看）
+  if (pendingRestoreTime > 1 && (!video.duration || pendingRestoreTime < video.duration - 3)) {
+    video.currentTime = pendingRestoreTime;
+  }
+  pendingRestoreTime = 0;
+
+  // 纯音频判定：无视频轨时 videoWidth/videoHeight 为 0（实测确认），切换音乐播放效果模式。
+  // 非音频文件却没有画面尺寸时不能直接进音乐模式：可能是内核解不了画面（此时交给兜底去重编码），
+  // 也可能是极少数容器此刻还没给出尺寸（所以延后 1.2 秒再确认一次）。
   if (!video.videoWidth && !video.videoHeight) {
-    const displayName = currentFilePath
-      ? currentFilePath.split(/[\\/]/).pop().replace(/\.[^.]+$/, '') || ''
-      : '';
-    enterMusicMode(currentFilePath, displayName);
+    if (isAudioExt(currentFilePath)) {
+      const displayName = currentFilePath
+        ? currentFilePath.split(/[\\/]/).pop().replace(/\.[^.]+$/, '') || ''
+        : '';
+      enterMusicMode(currentFilePath, displayName);
+    } else {
+      scheduleNoPictureCheck();
+    }
   } else {
     exitMusicMode();
   }
@@ -1506,8 +1755,14 @@ video.addEventListener('loadedmetadata', () => {
 // 于是长期停在音乐界面（字幕/截图按钮被隐藏、画面被效果层盖住）且没有纠正机会。
 // 首个可解码帧就绪（loadeddata）时复检一次，一旦发现其实有画面就立刻退出音乐模式。
 video.addEventListener('loadeddata', () => {
-  if (isMusicMode && (video.videoWidth > 0 || video.videoHeight > 0)) exitMusicMode();
+  if (video.videoWidth > 0 || video.videoHeight > 0) {
+    if (noPictureTimer) { clearTimeout(noPictureTimer); noPictureTimer = null; }
+    if (isMusicMode) exitMusicMode();
+  }
 });
+
+// 真正开始出声出画后才检查音轨（避免刚加载就误判）
+video.addEventListener('playing', () => scheduleAudioCheck());
 
 // 频谱动画跟随播放状态：播放即动、暂停即停（省电，不空转）
 video.addEventListener('play', () => {
@@ -1916,7 +2171,10 @@ if (loadSubBtn) {
       const filePath = await window.electronAPI.openSubtitleDialog();
       if (filePath) {
         // 带令牌：对话框/读取期间切了视频则丢弃旧字幕，避免覆盖到新视频上
-        const ok = await loadSubtitleFromPath(filePath, currentFilePath);
+        const targetVideo = currentFilePath;
+        const ok = await loadSubtitleFromPath(filePath, targetVideo);
+        // 选中成功即登记"手动优先"：此后同名字幕的自动加载不得把它顶掉
+        if (ok) manualSubtitleFor = targetVideo;
         showToast(ok ? '字幕导入成功' : '加载字幕文件失败');
       }
     } catch (err) {
@@ -2107,6 +2365,8 @@ function captureScreenshot() {
   const defaultName = `Screenshot_${Date.now()}.png`;
 
   canvas.toBlob((blob) => {
+    // 位图立即释放：4K 一张约 33MB，等 GC 的话连续截图会把峰值叠成 N×33MB
+    canvas.width = canvas.height = 0;
     if (!blob) {
       showToast('截图失败');
       return;
@@ -2114,6 +2374,7 @@ function captureScreenshot() {
     // 以 ArrayBuffer 传输，避免大图 base64 字符串经 IPC 结构化克隆造成卡顿
     blob.arrayBuffer().then((buf) => {
       window.electronAPI.saveScreenshot(buf, defaultName).then(success => {
+        if (success === null) return; // 用户在保存对话框点了"取消"：静默处理，不误报失败
         showToast(success ? '截图已成功保存到本地！' : '截图保存失败');
       }).catch(() => {
         showToast('截图保存失败');
@@ -2347,8 +2608,20 @@ function updateControlsOnMouseMove(e) {
 }
 
 if (videoContainer) {
+  // mousemove 高频触发（高回报率鼠标可达 1000Hz），而 updateControlsOnMouseMove 内部
+  // 有 getBoundingClientRect 强制同步布局。rAF 合帧：一帧只处理最后一次事件（与 bindWindowDrag 同一思路）。
+  let pendingMouseMove = null;
+  let mouseMoveFrame = 0;
   videoContainer.addEventListener('mousemove', (e) => {
-    updateControlsOnMouseMove(e);
+    pendingMouseMove = e;
+    if (!mouseMoveFrame) {
+      mouseMoveFrame = requestAnimationFrame(() => {
+        mouseMoveFrame = 0;
+        const ev = pendingMouseMove;
+        pendingMouseMove = null;
+        if (ev) updateControlsOnMouseMove(ev);
+      });
+    }
   });
   // 鼠标直接移出窗口：mousemove 收不到，按"已加载媒体移开即隐"契约在此兜底收起；
   // 全部 UI 都是 player-container 的子元素，mouseleave 仅在真正离窗时触发（子元素间移动不触发）；

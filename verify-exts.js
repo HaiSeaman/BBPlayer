@@ -7,12 +7,19 @@ const path = require('path');
 const assert = require('assert');
 const exts = require('./shared-video-exts');
 
-// 1) 结构自洽：视频 + 音频 = 全部，且无重复
-assert.ok(exts.video.length + exts.audio.length === exts.all.length, 'video.length + audio.length 必须等于 all.length');
+// 1) 结构自洽：三层清单相加 = 全部，且三层之间不得重复
+const groups = { video: exts.video, convertibleVideo: exts.convertibleVideo, audio: exts.audio };
+assert.ok(Array.isArray(exts.convertibleVideo) && exts.convertibleVideo.length > 0, 'convertibleVideo 必须存在');
+assert.ok(
+  exts.video.length + exts.convertibleVideo.length + exts.audio.length === exts.all.length,
+  'video + convertibleVideo + audio 必须等于 all'
+);
 const seen = new Set();
-for (const e of [...exts.video, ...exts.audio]) {
-  assert.ok(!seen.has(e), `扩展名重复定义: ${e}`);
-  seen.add(e);
+for (const [group, list] of Object.entries(groups)) {
+  for (const e of list) {
+    assert.ok(!seen.has(e), `扩展名重复定义: ${e}（在 ${group} 里）`);
+    seen.add(e);
+  }
 }
 
 // 2) 与 package.json 的 fileAssociations 对账（成员一致即可，不看顺序）
@@ -23,4 +30,4 @@ const extra = assoc.filter(e => !exts.all.includes(e));
 assert.deepStrictEqual(missing, [], `fileAssociations 缺少扩展名: ${missing.join(', ')}`);
 assert.deepStrictEqual(extra, [], `fileAssociations 含有未定义扩展名: ${extra.join(', ')}`);
 
-console.log(`[OK] 扩展名对账通过：视频 ${exts.video.length} + 音频 ${exts.audio.length} = 全部 ${exts.all.length}，与 package.json fileAssociations 一致`);
+console.log(`[OK] 扩展名对账通过：原生视频 ${exts.video.length} + 需转换视频 ${exts.convertibleVideo.length} + 音频 ${exts.audio.length} = 全部 ${exts.all.length}，与 package.json fileAssociations 一致`);
