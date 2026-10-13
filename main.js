@@ -80,7 +80,11 @@ if (!gotTheLock) {
     app.whenReady().then(() => {
       const filePaths = parseFilePathFromArgs(commandLine);
       if (filePaths.length > 0) {
-        for (const p of filePaths) createPlayerWindow({ isMain: false, initialFile: p });
+        // 同样受窗口上限约束：一次"打开方式"选中大量文件时，不能绕开 MAX_PLAYER_WINDOWS 开满窗口
+        for (const p of filePaths) {
+          if (playerWindows.size >= MAX_PLAYER_WINDOWS) break;
+          createPlayerWindow({ isMain: false, initialFile: p });
+        }
         return;
       }
       showMainWindow();
@@ -109,11 +113,17 @@ function loadWindowState() {
       // 三个按钮都画在窗口右上角（DOM 自绘，不是系统标题栏）。若存档来自更大的显示器
       // （例如 4K 屏存了 3000×1600，之后用 1080p 笔记本启动），窗口会比屏幕宽出一大截，
       // 右上角按钮整体落在屏幕外 —— 用户就**关不掉也拖不动**这个窗口。
-      // 可见区校验只管"左上角那一片还在不在"，管不住这个，所以这里单独钳一次。
-      if (typeof state.x === 'number' && typeof state.y === 'number') {
-        const wa = screen.getDisplayMatching({ x: state.x, y: state.y, width: state.width, height: state.height }).workArea;
-        state.width = Math.max(480, Math.min(state.width, wa.width));
-        state.height = Math.max(320, Math.min(state.height, wa.height));
+      // ⚠️ 尺寸钳制必须**无条件**执行：上面的"可见区过小"分支会删掉 x/y，若把尺寸钳制
+      //   挂在"x/y 存在"的前置条件上，那么最需要钳制的场景（存档来自已拔掉的显示器、
+      //   位置被判无效）反而被跳过，窗口照样宽出屏幕。位置信息还在时按其所在显示器钳，
+      //   已被删时按主显示器钳——尺寸与位置在此分开处理。
+      const hasPos = typeof state.x === 'number' && typeof state.y === 'number';
+      const wa = hasPos
+        ? screen.getDisplayMatching({ x: state.x, y: state.y, width: state.width, height: state.height }).workArea
+        : screen.getPrimaryDisplay().workArea;
+      state.width = Math.max(480, Math.min(state.width, wa.width));
+      state.height = Math.max(320, Math.min(state.height, wa.height));
+      if (hasPos) {
         state.x = Math.min(Math.max(state.x, wa.x), wa.x + wa.width - state.width);
         state.y = Math.min(Math.max(state.y, wa.y), wa.y + wa.height - state.height);
       }
@@ -128,6 +138,12 @@ function loadWindowState() {
 // 记录"程序化自动贴合尺寸"的窗口：resize-window-to-video 的自动 setSize 引发的 resize 不写进
 // 窗口状态记忆（避免覆盖用户手动调整的偏好尺寸）。用户手势拉伸（will-resize）时移出该集合。
 const programmaticResizeWindows = new WeakSet();
+
+// 记录"程序化挪窗"的目标坐标（win → {x, y}）：换片自动贴合时若窗口贴边会 setPosition 把它挪回屏内，
+// 这次挪动同样不该写进窗口状态记忆 —— 否则 writeWindowState 会把"程序化贴合出的尺寸+位置"整体落盘，
+// 绕过上面 resize 那条保护。move 事件到达时按目标坐标核对：一致就是这次程序化挪动，跳过保存；
+// 不一致（用户已改过）则照常记录。只消费一次，避免影响后续用户手动移动。
+const programmaticMoveTargets = new WeakMap();
 
 // 播放器窗口工厂：主窗口与"新窗口"弹窗共用同一套无边框窗口/事件逻辑。
 // isMain 决定是否记忆窗口状态；initialFile 为弹窗指定立即播放的文件。
@@ -194,8 +210,9 @@ function createPlayerWindow(options = {}) {
       initialFile = null; // 一次性消费：页面重载（如崩溃恢复）不重复投喂
     } else if (isMain && initialFilePaths && initialFilePaths.length > 0) {
       win.webContents.send('open-file', initialFilePaths[0]);
-      // 冷启动多文件：首个给主窗口播放，其余开独立弹窗
+      // 冷启动多文件：首个给主窗口播放，其余开独立弹窗（同样受窗口上限约束）
       for (let i = 1; i < initialFilePaths.length; i++) {
+        if (playerWindows.size >= MAX_PLAYER_WINDOWS) break;
         createPlayerWindow({ isMain: false, initialFile: initialFilePaths[i] });
       }
       initialFilePaths = null;
@@ -255,9 +272,19 @@ function createPlayerWindow(options = {}) {
       stateSaveTimer = setTimeout(writeWindowState, 400);
     };
     // resize 仅用户手势（will-resize 移出 programmaticResizeWindows）时落盘；
-    // 换片自动贴合尺寸（程序化 setSize）不写进记忆，避免覆盖用户偏好尺寸
+    // 换片自动贴合尺寸（程序化 setSize）不写进记忆，避免覆盖用户偏好尺寸。
+    // move 同理：程序化挪窗（贴合时把窗口拉回屏内）也不写进记忆 —— 按登记的目标坐标核对，
+    // 匹配则跳过并消费该登记；不匹配说明是用户手动移动，照常保存。
     win.on('resize', () => { if (!programmaticResizeWindows.has(win)) scheduleStateSave(); });
-    win.on('move', scheduleStateSave);
+    win.on('move', () => {
+      const target = programmaticMoveTargets.get(win);
+      if (target) {
+        programmaticMoveTargets.delete(win);   // 只消费一次，不长期残留
+        const b = win.getBounds();
+        if (b.x === target.x && b.y === target.y) return; // 正是这次程序化挪动 → 不写记忆
+      }
+      scheduleStateSave();
+    });
 
     // 主窗口"关闭"= 直接退出软件；退出前取消挂起的防抖保存并强制落盘一次窗口状态
     // （避免最后一次移动/缩放因防抖还没到点而丢失）
@@ -707,6 +734,9 @@ ipcMain.handle('resize-window-to-video', (event, payload) => {
   const { width, height } = payload;
   if (typeof width !== 'number' || typeof height !== 'number' || !isFinite(width) || !isFinite(height)) return false;
   if (width <= 0 || height <= 0) return false;
+  // 上界：正常路径只发真实分辨率（最大 8K≈7680），超过此值必是异常/注入输入 ——
+  // 极端宽高比会让下面 targetHeight 算出 0 这类无效尺寸。
+  if (width > 16384 || height > 16384) return false;
 
   const aspectRatio = width / height;
 
@@ -748,11 +778,14 @@ ipcMain.handle('resize-window-to-video', (event, payload) => {
   win.setSize(targetWidth, targetHeight);
 
   // 贴合后必须仍完整落在工作区内：窗口原本贴着屏幕右/下边缘时，放大后会被推出屏幕、画面被裁掉。
-  // 仅在真的需要挪动时才 setPosition，避免多余的 move 事件把贴合尺寸写进窗口状态记忆。
+  // 这次挪动同样是程序化的，必须登记目标坐标，让 move 事件跳过保存（否则会把贴合尺寸写进记忆）。
   const newX = Math.max(workArea.x, Math.min(currentBounds.x, workArea.x + workArea.width - targetWidth));
   const newY = Math.max(workArea.y, Math.min(currentBounds.y, workArea.y + workArea.height - targetHeight));
   if (newX !== currentBounds.x || newY !== currentBounds.y) {
-    win.setPosition(Math.round(newX), Math.round(newY));
+    const tx = Math.round(newX);
+    const ty = Math.round(newY);
+    programmaticMoveTargets.set(win, { x: tx, y: ty });
+    win.setPosition(tx, ty);
   }
   return true;
 });

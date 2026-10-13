@@ -53,3 +53,4 @@ vendor/ffmpeg/
 .workbuddy
 .commandcode/
 .reasonix/
+.qwen/

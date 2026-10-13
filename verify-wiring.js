@@ -85,8 +85,61 @@ assert.deepStrictEqual(missingRefs, [], `index.html 引用了不存在的文件:
     '目录扫描深度超限时必须置 truncated=true（否则深层视频静默丢失，用户不会知道）');
 }
 
+// 7) 控制栏收起时必须关掉毛玻璃（GPU 开销约束，用静态契约盯住）
+//    —— 毛玻璃 backdrop-filter 在背后画面变化时每帧都要重算；视频播放期控制栏若一直亮着，
+//       它就是持续 GPU 开销。收起态（.hide）必须显式置 backdrop-filter: none。
+//    这条规则只在 .hide 生效，静态截图/肉眼打开页面都验不出来，必须用契约盯住。
+{
+  const hideIdx = htmlSrc.indexOf('#controls-overlay.hide');
+  assert.ok(hideIdx > 0, '必须能找到 #controls-overlay.hide 规则（控制栏收起态）');
+  const hideBlock = htmlSrc.slice(hideIdx, hideIdx + 600);
+  const blockEnd = hideBlock.indexOf('}');
+  assert.ok(blockEnd > 0, '#controls-overlay.hide 规则必须有完整的 { } 块');
+  assert.ok(/backdrop-filter:\s*none/.test(hideBlock.slice(0, blockEnd)),
+    '控制栏收起(.hide)时必须 backdrop-filter: none（否则播放期毛玻璃每帧重算，白白烧 GPU）');
+  // 同时盯住：renderer 的 play 事件必须真的调用自动收起函数（改了 CSS 却没接线 = 白改）
+  assert.ok(/hideControlsIfUnused/.test(renSrc), 'renderer 必须定义并调用 hideControlsIfUnused（播放开始自动收起控制栏）');
+  const playIdx = renSrc.indexOf("video.addEventListener('play'");
+  assert.ok(playIdx > 0, '必须能找到 video 的 play 监听');
+  assert.ok(/hideControlsIfUnused\(\)/.test(renSrc.slice(playIdx, playIdx + 800)),
+    'video 的 play 监听里必须调用 hideControlsIfUnused()，否则控制栏永远不自动收起');
+}
+
+// 8) 本轮审查修复的 4 条"改了但容易改回去"的问题，用静态契约盯住
+{
+  // 8a) loadWindowState 的尺寸钳制必须**无条件**执行。
+  //     可见性校验会 delete x/y；若尺寸钳制挂在 hasPos 条件里，最需要钳制的场景反而被跳过。
+  const hasPosIdx = mainSrc.indexOf('const hasPos');
+  const clampIdx = mainSrc.indexOf('state.width = Math.max(480, Math.min(state.width, wa.width))');
+  const posGuardIdx = mainSrc.indexOf('if (hasPos) {');
+  assert.ok(hasPosIdx > 0 && clampIdx > 0 && posGuardIdx > 0, '必须能找到 hasPos / 尺寸钳制 / hasPos 分支');
+  assert.ok(clampIdx < posGuardIdx, '尺寸钳制必须排在 if (hasPos) 之前（无条件执行），否则存档位置无效时窗口会宽出屏幕、关不掉');
+  assert.ok(/screen\.getPrimaryDisplay\(\)\.workArea/.test(mainSrc), 'x/y 被删时必须退回主显示器工作区钳制尺寸');
+  // 8b) keydown 不得对 button 一刀切放行（否则点过按钮后方向键/F11/S/M 全部失效）
+  assert.ok(!/'input, button, textarea, select'/.test(renSrc),
+    'keydown 不能把 button 一并 return（按钮聚焦会吞掉全部快捷键）');
+  assert.ok(/closest\('button'\)\s*&&\s*\(e\.code === 'Space' \|\| e\.code === 'Enter'\)/.test(renSrc),
+    'button 只应在 Space/Enter 上让行（避免与按钮自身 click 双重触发）');
+  // 8c) 程序化挪窗不得写进窗口状态记忆
+  assert.ok(/programmaticMoveTargets/.test(mainSrc), '必须存在 programmaticMoveTargets（区分程序化挪窗与用户挪窗）');
+  assert.ok(!/win\.on\('move', scheduleStateSave\)/.test(mainSrc),
+    "move 不能无条件 scheduleStateSave（换片自动贴合的位置会覆盖用户偏好）");
+  // 8d) 多文件开窗（second-instance / 冷启动）必须同样受窗口上限约束
+  const limitUses = (mainSrc.match(/MAX_PLAYER_WINDOWS/g) || []).length;
+  assert.ok(limitUses >= 5, `MAX_PLAYER_WINDOWS 至少要在 5 处被引用（定义 1 + openInNewWindow 2 + second-instance 1 + 冷启动 1），实际 ${limitUses}`);
+  // 8e) 多余导出已移除（内部仍在使用这些常量，只是不再对外暴露）
+  const convSrc = read('converter.js');
+  const expIdx = convSrc.indexOf('module.exports = {');
+  assert.ok(expIdx > 0, '必须能找到 converter.js 的 module.exports');
+  const expBlock = convSrc.slice(expIdx, convSrc.indexOf('};', expIdx));
+  for (const sym of ['NATIVE_CONTAINERS', 'OK_VIDEO', 'OK_AUDIO', 'PIPELINE_VERSION']) {
+    assert.ok(!expBlock.includes(sym), `${sym} 不应再出现在导出里（无任何消费者）`);
+  }
+  assert.ok(expBlock.includes('NATIVE_EXTS'), 'NATIVE_EXTS 必须保留导出（verify-converter.js 在用）');
+}
+
 console.log(`[OK] 端到端接线对账通过：打包清单 ${REQUIRED_IN_PACKAGE.length} 个必需文件齐全；` +
   `renderer 调用的 ${called.size} 个 API 全部已暴露；` +
   `IPC 通道 ${invoked.size} 发/${listened.size} 收全部对得上；` +
   `HTML 引用 ${htmlRefs.length} 个本地资源均存在；` +
-  `窗口钳制与目录截断标记 2 条防御性修复到位`);
+  `窗口钳制/目录截断/控制栏收起关模糊/尺寸钳制无条件/快捷键范围/挪窗记忆/窗口上限/导出收敛 8 条防御性修复到位`);

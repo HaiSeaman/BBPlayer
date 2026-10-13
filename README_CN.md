@@ -6,7 +6,7 @@
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-1.9.0-ff3b4e?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.9.1-ff3b4e?style=for-the-badge)
 
 **纯粹、轻量、高颜值的 Windows 无边框本地多媒体播放器**
 
@@ -85,7 +85,7 @@
 
 - 转换进度在界面上实时显示（"正在换容器… 45%"），可随时切走取消；转好的文件会缓存，**第二次打开秒开**。
 - 探测判定"能播"、但内核实际播不出画面或声音时，会自动改用重新编码 / 换音频（运行时兜底，每个文件只兜一次）。
-- 内置的是 **LGPL 版 FFmpeg**，以独立进程方式调用（不链接、不修改），其许可证文本随程序一并分发；缺失时软件自动降级——这些老格式会提示播不了，其余格式不受影响。
+- 内置的是**精简自编版 LGPL FFmpeg**（单个约 14MB 静态文件；全量版约 150MB），以独立进程方式调用（不链接、不修改），其许可证文本随程序一并分发；缺失时软件自动降级——这些老格式会提示播不了，其余格式不受影响。
 
 除上面的内置转换器外，全部解码由 Chromium 原生完成——没有其它第三方解码库、也没有运行时 npm 依赖。文件关联由安装包生成，双击任一关联文件即可直接用 BBPlayer 打开。
 

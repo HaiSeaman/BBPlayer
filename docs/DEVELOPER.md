@@ -20,9 +20,10 @@ BBPlayer/
 ├── verify-converter.js     # 转换层自检：判定规则单测 + 真实样本对账 + 真实转换冒烟（v1.8.0 新增）
 ├── verify-renderer.js      # 渲染层无界面自检：DOM 桩真实执行 renderer.js 顶层脚本与事件回调（v1.8.0 新增）
 ├── verify-wiring.js        # 端到端接线对账：打包清单/preload API/IPC 通道/HTML 引用（v1.8.0 新增）
-├── vendor/ffmpeg/          # 内置 LGPL 版 FFmpeg（不进仓库；打包经 extraResources 落到 resources/ffmpeg）
+├── vendor/ffmpeg/          # 内置 LGPL 自编精简版 FFmpeg（单文件 ffmpeg.exe 14MB + LICENSE，v1.9.1；不进仓库，打包经 extraResources 落到 resources/ffmpeg）
 ├── run-test.bat            # 源码方式启动测试（自动检测 Node/Electron 环境）
-├── build/                  # 打包图标（彩虹渐变播放三角 ico/png，v1.6.1 重制）
+├── build/                  # 打包图标（彩虹渐变播放三角 ico/png，v1.6.1 重制）+ afterPack.js 打包后钩子（v1.9.1）
+├── tools/                  # 开发期工具（diag-cpu-gpu.js 无界面 CPU/GPU 诊断，v1.9.1；不进打包）
 └── package.json            # 元数据 + electron-builder 配置
 ```
 
@@ -507,9 +508,178 @@ npm run verify
 **未做（有意）**：换播放内核（mpv/libvlc，代价见报告 3.C）、自编 Chromium 拿 HEVC/AC3 平台解码（报告 3.D）、
 边转边播（P3 可选）、多音轨选择、内嵌字幕烧录。
 
+#### 精简版 FFmpeg 构建（v1.9.1）
+
+内置转换器由"LGPL 全量共享版"（`ffmpeg.exe` + 7 个 DLL，153.5MB）换成**自源码编译的
+精简静态版**（单文件 14MB，仅依赖 Windows 系统 DLL，LGPL-2.1，省约 140MB）。构建要点：
+
+- **工具链**：MSYS2 + mingw-w64（gcc / nasm / yasm / pkgconf）。**nasm 不能省**——缺它
+  FFmpeg 会关闭全部 SIMD 汇编优化，解码性能大幅下降。
+- **配置思路**：`--disable-everything` 后按白名单逐项 `--enable-*`，保住项目实际用到的
+  全部解码器（含 avi/flv/wmv/rmvb/ts/vob 等老格式）+ LGPL 兼容编码器
+  （`libopenh264` 软编 + `h264_nvenc`/`h264_qsv`/`h264_amf` 硬件编码）。
+- **必须启用的"非产品但必备"项**（**否则项目自己的测试基建会失效**）：
+  - `--enable-avdevice --enable-indev=lavfi`：`verify-converter.js` 与 `tools/diag-cpu-gpu.js`
+    都用 `-f lavfi -i testsrc` 造测试样本；lavfi 是**输入设备**（属 libavdevice），不是 demuxer。
+  - `--enable-decoder=wrapped_avframe`：lavfi 把帧交给编码器所必需，缺了会报
+    `no decoder found for: wrapped_avframe`。
+  - `--enable-encoder=mpeg4` + `--enable-libmp3lame` + `--enable-muxer=avi`：
+    `verify-converter.js` 用 `-c:v mpeg4 -c:a libmp3lame` 造 `.avi` 测试样本。
+  - `--enable-zlib`：png 解码依赖它（关掉 `--disable-autodetect` 会连带关掉 png）。
+- **静态化踩坑**：`--pkg-config-flags=--static` + `--extra-ldflags="-static -static-libgcc
+  -static-libstdc++"`；**MSYS2 的 libvpl 是 C++ 静态库，gcc 链接必须再给
+  `--extra-libs=-lstdc++`**，否则 configure 会误报 `libvpl >= 2.6 not found`
+  （实为链接期 `operator new` 等符号未定义）。另：MSYS2 提供的是 `vpl.pc` 而 FFmpeg 找
+  `libvpl`，需为 pkg-config 建一个 `libvpl.pc` 副本。
+- **产物核对**：`objdump -p ffmpeg.exe | grep "DLL Name"` 应只剩 Windows 系统 DLL；
+  用白名单脚本逐项核对解码/编码/封装能力；并真实跑一次"造 .avi → transcode → 产物可解析"
+  的端到端转换（`vendor/ffmpeg` 已在 `.gitignore`，替换前务必另存备份）。
+- **许可**：LGPL-2.1，`vendor/ffmpeg/LICENSE.txt` 取自源码 `COPYING.LGPLv2.1`。
+
 ---
 
 ## 三、版本变更明细
+
+### v1.9.1——体积瘦身 213MB + 播放期 GPU 开销收敛 + 全量审查修复
+
+> 本节记录 v1.9.1 相对 v1.9.0 的实际改动。本版有三大块：**安装体积瘦身**（-213MB）、
+> **播放期 GPU 开销收敛**，以及**一轮全量代码审查**驱动的 7 项正确性修复与死代码清理。
+> 无界面验证方式见 D 节。
+
+#### A. 体积瘦身：装完占用 521MB → 308MB（−213MB / −41%）
+
+三块独立收益，均已用 `--dir` 真实打包逐项核对：
+
+1. **语言包 55 → 2（−47MB）**：Electron 自带 55 个 `.pak` 语言文件，本项目只需
+   中文与英文。`package.json` 新增 `electronLanguages: ["zh-CN", "en-US"]`。
+   electron-builder 26.x 对此有保护：若名单匹配不到任何语言，会**跳过清理并告警**
+   （不会打包出空 `locales/` 导致启动即崩——见 electron#52307 / electron-builder#10007）。
+   打包后断言 `locales/` 恰为 2 个文件。
+2. **删除 WebGPU 着色器编译器（−26MB）**：`dxcompiler.dll` + `dxil.dll` 仅 WebGPU
+   用来编译 GPU 着色器，本项目只用 `<video>` 播放，完全不需要（Electron 官方 28.0.0
+   的 PR #41120 也曾主动移除）。新增 `build/afterPack.js` 钩子，在 Windows 打包后删除
+   这两个文件；文件不存在则静默跳过，删除失败也不阻断打包。`build/afterPack.js` 自身
+   通过 `files` 的 `!build/afterPack.js` 排除，不进安装包。
+3. **内置 FFmpeg 换精简自编版（153.5MB → 13.4MB，−140MB）**：原为 LGPL 全量共享版
+   （`ffmpeg.exe` + 7 个 DLL，含大量用不到的组件——单 `avfilter` 就 30MB，而项目零滤镜
+   用法）。改为**自源码编译的精简静态版**：单个 `ffmpeg.exe` 14MB，仅依赖 Windows 系统
+   DLL，LGPL-2.1。构建要点与踩坑见第 20 节末尾"精简版构建"。
+
+#### B. 播放期 GPU 开销收敛（控制栏毛玻璃）
+
+**问题**：底部功能栏 `#controls-overlay` 的 `backdrop-filter: blur(20px)` 在背后画面
+变化时**每帧都要重算**。而控制栏默认可见（`opacity:1`），只有"鼠标进底部热区再移开"
+才收起——用户点开视频后鼠标不动时，控制栏整场亮着，毛玻璃就整场每帧重算，是播放期
+GPU 的主要开销（依据见 `docs/PERF-REVIEW-1.7.0.md` 第六节实测结论）。
+
+**修复（两处配合）**：
+
+1. `renderer.js` 新增 `hideControlsIfUnused()`：`video` 的 `play` 事件里调用——
+   播放一开始，若指针**不在**底部感应区、且未悬停功能栏本体，就自动收起控制栏。
+   指针位置由 `lastPointerClientY`（`mousemove` 时记录）判断，不用易变的 `devicePixelRatio`。
+   鼠标一移到位，既有的 `updateControlsOnMouseMove` 照常把它唤出。
+2. `index.html` 的 `#controls-overlay.hide` 新增 `backdrop-filter: none`：**收起时彻底
+   关掉毛玻璃**。不可见时的模糊纯属白算——更关键的是设备像素比（dpr）变化会重建
+   `backdrop-filter` 的模糊缓存，若隐藏时仍挂着模糊，"控制栏一直藏着"的场景（如纯音频
+   播放）会因 dpr 抖动反复重建、每帧白烧一次 GPU。
+
+**视觉零变化**：控制栏可见时的外观完全不变（毛玻璃只在它收起后关闭）。
+
+#### C. 全量审查修复的 7 个缺陷
+
+由只读子代理审查 + 逐条独立实测确认（**其中 2 条经实测证伪，未改**，见 D 节）：
+
+1. **历史视图 ↔ 列表视图切换后条目串台（中）**：`renderer.js` 的 `renderPlaylist()` 增量
+   分支只认 `.playlist-item` 这个 class，而历史视图的条目**共用同一个 class**却不设
+   `dataset.index`——从历史视图切回列表视图时，会把残余的历史条目误当成"已有列表项"而只做
+   增量追加，导致列表前几行仍是历史条目（无序号/均衡器，点击还会跳回历史视图）。
+   修复：增量分支追加 `firstChild.dataset.index !== undefined` 校验。
+2. **无边框窗口"关不掉"（中高）**：`main.js` 的 `loadWindowState()` 中，尺寸钳制曾挂在
+   "x/y 存在"的前置条件上；而上面的可见性校验会把屏幕外的 x/y `delete` 掉——于是最需要
+   钳制的场景（存档来自已拔掉的显示器）**反而跳过尺寸钳制**，窗口宽出一大截，
+   `frame:false` 的右上角自绘按钮整体落在屏外。实测复现：4K 副屏存档（x=2560,w=3000）
+   换到 1080p 工作区（1920 宽），窗口仍返回 3000 宽。修复：尺寸钳制**无条件执行**，
+   位置信息在时按其显示器钳、已被删时退回主显示器钳。
+3. **点过按钮后快捷键全失效（中）**：`renderer.js` 的 `keydown` 首行曾对
+   `input, button, textarea, select` 一律 `return`。按钮被点击后会保持焦点，于是
+   "点播放 → 按方向键快进"完全失效（方向键/F11/S/M 全被吞）。真实 Chromium 实测确认：
+   按钮聚焦时 `e.target` 为 `BUTTON`、命中拦截。修复：文本输入类控件全放行，**按钮仅在
+   Space/Enter 上让行**（保留"防与按钮自身 click 双重触发"的原意）。
+4. **程序化挪窗覆盖用户位置偏好（中低）**：`resize-window-to-video` 贴合时若窗口贴边会
+   `setPosition` 把它挪回屏内，而 `move` 监听此前**无条件**写入窗口状态记忆（`resize`
+   有 `programmaticResizeWindows` 保护，`move` 没有）。修复：新增
+   `programmaticMoveTargets`（WeakMap），登记程序化挪窗目标坐标，`move` 到达时按坐标
+   核对、一致则跳过并消费登记（只消费一次）。
+5. **缓存清理误删正在写入的产物（低）**：`converter.js` 的 `cleanup()` 在转换成功后以
+   fire-and-forget 方式发起（不 `await`），它在 `await readdir/stat` 让出期间，队列里
+   下一个任务可能已开始写自己的 `.part.mp4`——残留碎片清理会把这个"正在写的半成品"删掉，
+   正在跑的 ffmpeg 就写向已删除路径而失败。修复：新增 `activeParts` 集合登记在写的
+   `.part`，`cleanup` 扫描时跳过；每个 `.part` 的写入 try/finally 中登记与注销。
+6. **多文件开窗绕过窗口上限（低）**：`MAX_PLAYER_WINDOWS` 此前只在
+   `window:openInNewWindow` 检查；`second-instance` 与冷启动的多文件开窗循环未检查——
+   一次"打开方式"选大量文件即可绕开上限。修复：两处循环同样判上限。
+7. **分辨率参数缺上界（低）**：`resize-window-to-video` 只校验
+   `number/isFinite/>0`，无上界；极端宽高比会算出无效尺寸。修复：加 `> 16384` 拒绝
+   （正常路径只发真实分辨率，最大 8K≈7680）。
+
+此外还修正了 `converter.js` 中两处**与实测矛盾的误导性注释**：曾写"Windows 上 kill 不带
+signal"，实测为 `code=null, signal=SIGTERM`（**带** signal）。该错注释正是审查者误报
+"转换被 kill 后会被当成编码器失败重试"的根源，已按实测更正——若真照错注释删掉
+`if (signal)` 判断，主动取消将无法识别。（属注释修正，不计入上面的 7 个缺陷。）
+
+#### D. 验证：实测证伪了两条候选，未做无谓改动
+
+审查共报出候选若干，**逐条实测**后只修确认为真的：
+
+- ❌ **"磁盘预检 `estimateOutputBytes` 无上限、长视频会被误拒"——实测证伪**：
+  调真实模块算 SD（480p）10 小时仅约 **12.87GB**，低于 `maxOutputBytes`（16GB）上限，
+  不会被拒。**未改**。
+- ❌ **"`shared-video-exts.js` 的 `nativeAll` 字段无人使用、是死代码"——核实为误报**：
+  它被 `converter.js` 的 `NATIVE_EXTS` 真实使用，删了会坏。**未改**。
+- 另：重复实现（`basename` 手写 6 处、扩展名提取 3 套写法、删除按钮 SVG、hms→秒换算
+  两遍）确存在，但属**惯用写法**，按"禁止随意重构、简单能用就不要复杂化"**不改**。
+
+#### E. 死代码与失真物清理
+
+- `index.html`：删除无消费者的 `.rw-2` / `.rw-6` CSS 规则（三处 SVG 渐变只用
+  1/3/4/5/7；**变量保留**，`--rainbow-gradient` 仍用）；删除死 class `class="music-title"`
+  （样式走 `#music-title` id，仍保留）。
+- `renderer.js`：删除 `bindWindowDrag` 的死参数 `onDragStart`（两个调用点均未传）。
+- `converter.js`：移除无消费者的 4 个导出（`NATIVE_CONTAINERS` / `OK_VIDEO` / `OK_AUDIO` /
+  `PIPELINE_VERSION`——内部仍在使用，只是不再对外暴露）。
+- `preload.js`：修正失真注释（曾写返回 `{video, audio, all}`，实际为
+  `{...VIDEO_EXTS, subtitle}`，即含 `convertibleVideo` / `nativeAll` / `subtitle`）。
+- `.gitignore`：新增 `.qwen/`（此前某 AI 工具残留目录未被忽略）。
+
+#### F. 新增：无界面 CPU/GPU 诊断工具
+
+`tools/diag-cpu-gpu.js`：**隐藏窗口**运行（`show:false`，用户看不到界面），用
+`app.getAppMetrics()` 按进程度量 CPU/私有内存，用 `app.getGPUInfo()` 读设备与图形栈，
+再解码一段测试视频统计推进与丢帧——结论全部走命令行输出。支持
+`<视频> --seconds=N --blur --visible`。
+
+**如实记录的局限**：隐藏窗口下 Chromium 往往**不初始化图形栈**
+（实测 `auxAttributes.glImplementationParts=(gl=none,angle=none)`、`skiaBackendType=None`），
+故"硬解还是软解"在隐藏模式下**测不准**——脚本会明确输出"本次无法判定"，并提示改
+`--visible`（会短暂显示窗口）重测。本工具是开发期诊断用，**不进打包**（`files` 白名单不含 `tools/`）。
+
+#### G. 测试基建扩充
+
+- `verify-renderer.js`：**37 → 44 项**。新增控制栏自动收起 5 项（远离底部收起 / 指针在
+  感应区不收 / 悬停功能栏不收 / play 事件接线正确 / `showControls` 能重新唤出）、
+  历史↔列表视图切换不串台 2 项。
+- `verify-wiring.js`：新增第 8 组 **8 条静态契约**，逐条钉住本版修复（尺寸钳制无条件 /
+  keydown 不对 button 一刀切 / `programmaticMoveTargets` 存在且 `move` 不可无条件保存 /
+  `MAX_PLAYER_WINDOWS` 至少 5 处引用 / 4 个多余导出已移除且 `NATIVE_EXTS` 保留）。
+
+#### H. 遗留事项（评估后未改，附理由）
+
+- 同 v1.9.0 E 节：多窗口 localStorage 互相覆盖、外部播放器兜底按钮、边转边播/多音轨/
+  内嵌字幕烧录，均维持"未做（有意）"。
+- 删 DLL 化（dxcompiler/dxil）与语言包裁剪均为打包期移除，**未修改** Electron 发行包本体；
+  若将来 Electron 版本行为变化导致这两个文件变为必需，`afterPack.js` 需复核（届时视频
+  播放会先暴露异常）。
+- `.qwen/` 残留文件本身未删（涉及 git 操作，待用户决定）。
 
 ### v1.9.0——Electron 34→44 升级 + 审计确认 bug 修复 + 运行时开销收敛
 
@@ -1239,3 +1409,23 @@ npm run build
 打包产物为两个 exe：NSIS 安装版 exe（`BBPlayer Setup <版本>.exe`）与 portable 便携版 exe
 （`BBPlayer <版本>.exe`）。`publish` 为 `null`，不生成更新清单、不做自动更新。
 `release-dist/` 已被 .gitignore 排除，勿将构建产物提交进仓库。
+
+### v1.9.1 新增的打包注意事项
+
+- **若打包卡在"下载 Electron"**：electron-builder 默认会联网下载 Electron 发行包，弱网/被墙
+  环境会超时。本机已装 Electron 时可改用本机副本跳过下载：
+
+  ```bat
+  npx electron-builder --win --config.electronDist=node_modules/electron/dist
+  ```
+
+- **打包后会自动删文件**：`build/afterPack.js` 钩子（v1.9.1 新增）在 Windows 打包后删除
+  用不到的 WebGPU 着色器编译器 `dxcompiler.dll` / `dxil.dll`（−26MB）。构建日志会打印
+  `[afterPack] 已移除无用的 WebGPU 着色器编译器：...`。该钩子仅在打包期生效，不进软件本体。
+- **打包后建议核对**：
+  - `locales/` 恰为 2 个文件（`zh-CN.pak` / `en-US.pak`）；
+  - 产物根目录**无** `dxcompiler.dll` / `dxil.dll`；
+  - `resources/ffmpeg/` 为 1 个 `ffmpeg.exe`（约 14MB）+ `LICENSE.txt`；
+  - 整包 `win-unpacked` 约 **308MB**（v1.9.0 为 521MB）。
+
+

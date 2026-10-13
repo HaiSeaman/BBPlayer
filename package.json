@@ -1,6 +1,6 @@
 {
   "name": "bb-player",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "description": "BBPlayer",
   "main": "main.js",
   "author": "",
@@ -26,6 +26,11 @@
     "directories": {
       "output": "release-dist"
     },
+    "afterPack": "build/afterPack.js",
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
     "files": [
       "main.js",
       "preload.js",
@@ -35,7 +40,8 @@
       "shared-video-exts.js",
       "shared-subtitle-exts.js",
       "package.json",
-      "build/**/*"
+      "build/**/*",
+      "!build/afterPack.js"
     ],
     "extraResources": [
       {

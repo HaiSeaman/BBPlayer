@@ -2,7 +2,12 @@
 if (!window.electronAPI) throw new Error('BBPlayer 必须在 Electron 环境中运行');
 
 // 媒体扩展名（单一事实来源 shared-video-exts.js / shared-subtitle-exts.js，经主进程 IPC 一次性获取）。
-// 异步获取足够安全：所有消费点（拖拽过滤、音频判断）都发生在用户交互之后。
+// 异步获取足够安全，理由（实测过调用链，不是想当然）：所有消费点都晚于"扩展名就绪"——
+//   · 拖拽过滤（mediaExtensions.all / .subtitle）与对话框加列表：都要用户交互，远晚于本次 IPC；
+//   · loadAndPlayVideo 里的音频判断与同名自动字幕：它们之前必先 `await prepareMedia(...)`
+//     （同样一次 IPC 往返），而本 IPC 在脚本顶层就已发出、早于那次 prepareMedia，故到达消费点时必已就绪；
+//   · 音乐模式判定（loadedmetadata）与运行时兜底转换：更晚。
+// ⚠️ 维护警告：不要在上面这些点之前新增"同步消费 mediaExtensions"的代码，否则会读到空清单（默认值）。
 let mediaExtensions = { video: [], convertibleVideo: [], audio: [], all: [], subtitle: [] };
 window.electronAPI.getVideoExtensions().then(list => {
   if (list && Array.isArray(list.all)) mediaExtensions = list;
@@ -153,6 +158,9 @@ const TITLEBAR_HOTZONE_HEIGHT = 56; // 顶部感应区高度（像素）：标�
 let toastTimer = null;
 let clickTimer = null; // 单击/双击区分计时器
 let lastVolume = 1.0;
+// 鼠标最近一次在窗口内的纵向坐标（clientY）。播放开始自动收起控制栏时用它判断
+// "指针是不是停在底部感应区里"，避免用 devicePixelRatio 等与指针无关、且会抖动的值。
+let lastPointerClientY = -1;
 let currentSubtitleData = [];
 let subtitleOffset = 0; // 字幕时间偏移（秒），>0 表示字幕延后出现
 let pendingResumeTime = 0;
@@ -1075,7 +1083,12 @@ function renderPlaylist() {
   const existingCount = playlistItemsContainer.children.length;
   if (existingCount > 0 && existingCount <= playlist.length) {
     const firstChild = playlistItemsContainer.children[0];
-    if (firstChild && firstChild.classList && firstChild.classList.contains('playlist-item')) {
+    // 必须同时确认是「列表条目」：列表条目才有 dataset.index，而历史视图的条目虽然共用
+    // .playlist-item 这个类、却**不设** dataset.index。从历史视图切回列表视图时若不校验，
+    // 会把残余的历史条目误当成"已有列表项"而只做增量追加，导致列表前几行仍是历史条目
+    // （没有序号/均衡器，点击还会跳回历史视图）。
+    if (firstChild && firstChild.classList && firstChild.classList.contains('playlist-item')
+        && firstChild.dataset.index !== undefined) {
       appendPlaylistItems(existingCount);
       syncPlaylistPauseIndicator(); // 追加后重挂起停状态（新条目无标记，老条目已带）
       return;
@@ -1486,8 +1499,8 @@ if (playPauseBtn) playPauseBtn.addEventListener('click', togglePlayPause);
 // 契约：左键按下 → 位移超过 4px 确认为拖拽（区分单击）→ rAF 合帧调用 moveWindow；
 // pointerup/pointercancel/窗口失焦（Alt-Tab）均兜底清理监听器，防止累积。
 // 回调：onPointerDown(e) 返回 false 可否决本次按下（如点击在标题栏按键区）；
-// onDragStart() 拖拽确认瞬间回调；onPointerUp(dragged) 左键释放回调（dragged=是否发生了拖拽）。
-function bindWindowDrag(el, { onPointerDown, onDragStart, onPointerUp } = {}) {
+// onPointerUp(dragged) 左键释放回调（dragged=是否发生了拖拽）。
+function bindWindowDrag(el, { onPointerDown, onPointerUp } = {}) {
   if (!el) return;
   el.addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return; // 仅左键响应
@@ -1506,7 +1519,6 @@ function bindWindowDrag(el, { onPointerDown, onDragStart, onPointerUp } = {}) {
       const dy = moveEv.screenY - startY;
       if (!dragging && (Math.abs(dx) > 4 || Math.abs(dy) > 4)) {
         dragging = true;
-        if (onDragStart) onDragStart();
       }
       if (dragging) {
         dragTarget = { x: initialWinX + dx, y: initialWinY + dy };
@@ -1772,6 +1784,9 @@ video.addEventListener('play', () => {
   // AudioContext 挂起兜底：自动播放策略收紧/长时间挂起后，每次播放都尝试唤醒音频上下文，否则会无声且无提示
   if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
   if (isMusicMode && !musicAnimFrame) drawSpectrumFrame();
+  // 播放刚开始就把"没在用的"控制栏收起来：其毛玻璃在视频播放期每帧都要重算，是 GPU 主要开销。
+  // 鼠标若正停在底部感应区则不动它（hideControlsIfUnused 内部判断）。
+  hideControlsIfUnused();
 });
 video.addEventListener('pause', () => {
   if (musicAnimFrame) { cancelAnimationFrame(musicAnimFrame); musicAnimFrame = null; }
@@ -2435,9 +2450,13 @@ if (videoContainer) {
 
 // 快捷键
 window.addEventListener('keydown', (e) => {
-  // 焦点在原生可交互控件上时，把按键交还给控件自身，避免与全局快捷键双重触发
-  // （典型场景：点击播放按钮后按钮保持焦点，再按 Space 会同时触发按钮 click 与全局 toggle）
-  if (e.target.closest && e.target.closest('input, button, textarea, select')) return;
+  // 焦点归属：文本输入类控件（输入框/多行文本/下拉）要把按键完全交还，否则打字会被快捷键抢走。
+  // ⚠️ button **不能**一刀切放行：按钮被点击后会保持焦点，若连同按钮一起 return，
+  //    用户"点一下播放按钮 → 按下方向键快进"就完全失效（方向键/F11/S/M 全被吞掉）。
+  //    按钮只在其激活键（Space/Enter）上让行，避免与按钮自身 click 双重触发。
+  const target = e.target;
+  if (target && target.closest && target.closest('input, textarea, select')) return;
+  if (target && target.closest && target.closest('button') && (e.code === 'Space' || e.code === 'Enter')) return;
   // 如果按下了 Ctrl / Alt / Command 等系统组合功能键，不触发内置快捷键
   if (e.ctrlKey || e.altKey || e.metaKey) return;
   switch (e.code) {
@@ -2504,6 +2523,23 @@ function hideControlsNow() {
   }
   if (controlBar) controlBar.classList.add('hide');
   closeAllMenus();
+}
+
+// 播放开始后，若鼠标既不在底部感应区、也不在功能栏本身上，就自动收起控制栏。
+// 目的：多数人点开视频后鼠标并不停在下缘，若控制栏一直亮着（opacity:1），它的毛玻璃
+// 每帧都要重算一次（背后视频画面在动，模糊无法缓存），是播放期 GPU 的主要开销来源。
+// 收起后 .hide 会同时关掉毛玻璃（见 index.html 的 #controls-overlay.hide）。鼠标一移到位
+// 置，updateControlsOnMouseMove 会照常把它唤出。用户点过"暂停"后是暂停态，不自动收。
+function hideControlsIfUnused() {
+  const rect = videoContainer ? videoContainer.getBoundingClientRect() : null;
+  // 无布局信息时保守起见不收起（宁可多显示，也不误收让用户找不到按钮）
+  if (!rect) return;
+  // 指针是否落在底部感应区内：用当前指针位置判断，不依赖 devicePixelRatio 等易变值
+  const inHotzone = (rect.bottom - lastPointerClientY) <= CONTROLS_HOTZONE_HEIGHT;
+  if (inHotzone) return;
+  // 鼠标正停在功能栏上则不收（与 showControls 的"悬停保持显示"契约一致）
+  if (controlBar && controlBar.matches(':hover')) return;
+  hideControlsNow();
 }
 
 // --- 顶部标题栏 ---
@@ -2613,6 +2649,7 @@ if (videoContainer) {
   let pendingMouseMove = null;
   let mouseMoveFrame = 0;
   videoContainer.addEventListener('mousemove', (e) => {
+    lastPointerClientY = e.clientY; // 记录指针位置，供播放开始自动收起控制栏时判断是否停在感应区
     pendingMouseMove = e;
     if (!mouseMoveFrame) {
       mouseMoveFrame = requestAnimationFrame(() => {

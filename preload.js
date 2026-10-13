@@ -12,7 +12,8 @@ function makeIdempotentSubscriber(channel) {
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  // 获取媒体扩展名（单一来源：shared-video-exts.js → 主进程 IPC 下发），结构 { video, audio, all }
+  // 获取媒体扩展名（单一来源：shared-video-exts.js → 主进程 IPC 下发）。
+  // 返回结构由 main.js 的 app:getVideoExtensions 决定：{ video, convertibleVideo, audio, all, nativeAll, subtitle }
   getVideoExtensions: () => ipcRenderer.invoke('app:getVideoExtensions'),
 
   // 窗口控制

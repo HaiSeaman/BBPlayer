@@ -253,6 +253,11 @@ let activeChild = null;
 let activeKey = null;
 // 所有在跑的子进程（含探测进程）：关窗/退出时必须一个不剩地杀掉，否则会留下吃 CPU 的幽灵 ffmpeg
 const children = new Set();
+// 正在写入的临时产物（.part.mp4）：cleanup 扫描缓存目录时必须跳过它们。
+// 为什么：cleanup 在转换成功后以 fire-and-forget 方式发起（不 await），它在 await readdir/stat
+// 让出期间，队列里的下一个任务可能已经开始写自己的 .part.mp4 —— 若 cleanup 把这条"半截产物"
+// 当残留碎片删掉，那个正在跑的 ffmpeg 就会写到一个已被删除的路径上而失败。
+const activeParts = new Set();
 
 function generationOf(key) {
   return generations.get(key) || 0;
@@ -391,8 +396,8 @@ function runFfmpegOnce(args, key, durationSec, onProgress) {
     child.on('error', (e) => finish(() => reject(e)));
     child.on('close', (code, signal) => {
       finish(() => {
-        // 体积超限要先于 signal/退出码判断：这条错误必须如实告诉用户原因，
-        // 不能被笼统的"ffmpeg 退出码 1"盖掉（Windows 下 kill 也不带 signal）
+        // 体积超限先判：超限时是我们主动 kill，close 回调为 code=null/signal=SIGTERM（实测），
+        // 会与"用户主动取消"撞在一起；不先判就被当成取消静默吞掉，用户看不到"产物超限"这个真因。
         if (tooLarge) {
           const limit = config.maxOutputBytes >= 1024 ** 3
             ? `${(config.maxOutputBytes / 1024 ** 3).toFixed(0)} GB`
@@ -402,8 +407,8 @@ function runFfmpegOnce(args, key, durationSec, onProgress) {
             { isOutputTooLarge: true, stderrTail }
           ));
         }
-        // 看门狗超时优先于"signal → 取消"判断：Windows 上 kill 不带 signal 区分，
-        // 不先判这条的话，真实的"源文件读不动"会被当成用户取消而静默吞掉
+        // 看门狗超时优先判：它与"用户取消"的 close 都是 code=null/signal=SIGTERM（实测），
+        // 不先判这条，"源文件读不动"会被当成用户取消而静默吞掉
         if (timedOut) {
           return reject(Object.assign(
             new Error('转换超时：源文件 120 秒无任何响应，可能所在的磁盘/网络位置已断开或存在坏道'),
@@ -621,6 +626,7 @@ async function prepare(inputPath, opts = {}) {
     // 写成 "xxx.mp4.part" 会直接报 "Error opening output files: Invalid argument"（实测踩过）。
     const part = outPath.replace(/\.mp4$/, '.part.mp4');
     try { await fsp.unlink(part); } catch (e) { /* 不存在 */ }
+    activeParts.add(part);   // 登记：cleanup 扫描时必须跳过这个正在写入的半截产物
     let converted = false;
     try {
       await convertWithRetry(inputPath, part, tier, probe, key, onProgress, encoders);
@@ -628,6 +634,7 @@ async function prepare(inputPath, opts = {}) {
     } finally {
       // 失败或取消都要清掉半截产物：否则 GB 级碎片会一直堆在临时目录里（只有重启才清）
       if (!converted) { try { await fsp.unlink(part); } catch (e) { /* 没产出 */ } }
+      activeParts.delete(part);   // 无论成败都注销：之后它要么已改名（不再存在），要么已删除
     }
     if (myGen !== generationOf(key)) { try { await fsp.unlink(part); } catch (e) {} throw makeCancelledError(); }
     await fsp.rename(part, outPath);   // 原子改名：播放端永远看不到半截文件
@@ -653,7 +660,11 @@ async function cleanup(force) {
       const p = path.join(dir, name);
       const st = await fsp.stat(p).catch(() => null);
       if (!st || !st.isFile()) continue;
-      if (/\.part\.mp4$/.test(name)) { await fsp.unlink(p).catch(() => {}); continue; }
+      if (/\.part\.mp4$/.test(name)) {
+        // 跳过正在写入的半截产物（见 activeParts）：删它会让正在跑的 ffmpeg 写向已删除路径而失败
+        if (!activeParts.has(p)) await fsp.unlink(p).catch(() => {});
+        continue;
+      }
       // 排序依据：优先用"本次进程内最后一次被 prepare 命中"的时间（可靠、跨平台一致），
       // 没有记录（软件刚重启）才退回文件 mtime。
       // 绝不用 atime：Windows NTFS 默认不更新它（实测读文件后完全不变），
@@ -690,7 +701,7 @@ module.exports = {
   parseProbe, decideTier, cacheFileName, parseProgress, progressPercent,
   prepare, invalidate, killActive, cleanup, availableEncoders, looksLikeEncoderFailure, openh264Bitrate,
   looksLikeInputError, estimateOutputBytes,
-  NATIVE_CONTAINERS, OK_VIDEO, OK_AUDIO, PIPELINE_VERSION, NATIVE_EXTS,
+  NATIVE_EXTS,
   // 读取当前生效配置（测试要断言产物体积上限这类配置真被读进去了）
   currentConfig: () => Object.assign({}, config)
 };

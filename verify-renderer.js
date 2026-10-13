@@ -946,6 +946,105 @@ async function musicAndDurationTest() {
   });
 }
 
+// ============ 第五组之四：播放开始自动收起控制栏（GPU 开销收敛） ============
+
+// 控制栏的毛玻璃在视频播放期每帧都要重算，是 GPU 主要开销。播放开始时若鼠标不在底部
+// 感应区，必须把它收起（收起态会同时关闭毛玻璃，见 index.html 的 #controls-overlay.hide）。
+function controlsAutoHideTest() {
+  const inHotzoneY = 700;  // 底部感应区（容器高 720，感应区高 120）
+  const awayY = 100;       // 远离底部
+
+  ok('播放开始自动收起控制栏：指针不在底部感应区时收起', () => {
+    const env = loadRenderer();
+    env.videoEl.dispatch('play', {}); // 先触发一次，确保监听已挂
+    vm.runInContext(`lastPointerClientY = ${awayY};`, env.context);
+    callFn(env, 'hideControlsIfUnused')();
+    assert.strictEqual(env.byId('controls-overlay').classList.contains('hide'), true,
+      '指针远离底部时必须收起控制栏，否则毛玻璃会在播放全程每帧重算');
+  });
+
+  ok('指针停在底部感应区内时不收起控制栏', () => {
+    const env = loadRenderer();
+    vm.runInContext(`lastPointerClientY = ${inHotzoneY};`, env.context);
+    callFn(env, 'hideControlsIfUnused')();
+    assert.strictEqual(env.byId('controls-overlay').classList.contains('hide'), false,
+      '指针正在底部感应区时不能收起，否则用户正在操作却被藏掉');
+  });
+
+  ok('鼠标正悬停在功能栏上时不收起控制栏', () => {
+    const env = loadRenderer();
+    const bar = env.byId('controls-overlay');
+    vm.runInContext(`lastPointerClientY = ${awayY};`, env.context);
+    const orig = bar.matches;
+    bar.matches = (sel) => (sel === ':hover' ? true : orig.call(bar, sel)); // 模拟真实悬停
+    callFn(env, 'hideControlsIfUnused')();
+    assert.strictEqual(bar.classList.contains('hide'), false,
+      '鼠标停在功能栏本身上时必须保持显示（与 showControls 的悬停契约一致）');
+  });
+
+  ok('控制栏已显示时，播放开始能把它收起（play 事件接线正确）', () => {
+    const env = loadRenderer();
+    const bar = env.byId('controls-overlay');
+    vm.runInContext(`lastPointerClientY = ${awayY};`, env.context);
+    assert.strictEqual(bar.classList.contains('hide'), false, '初始应可见');
+    env.videoEl.play(); // 触发 play 事件 → hideControlsIfUnused
+    assert.strictEqual(bar.classList.contains('hide'), true,
+      'play 事件必须触发自动收起（接线断了就白改）');
+  });
+
+  ok('收起后控制栏能被重新唤出（去 hide 后不再隐藏）', () => {
+    const env = loadRenderer();
+    const bar = env.byId('controls-overlay');
+    vm.runInContext(`lastPointerClientY = ${awayY};`, env.context);
+    callFn(env, 'hideControlsIfUnused')();
+    assert.strictEqual(bar.classList.contains('hide'), true, '先收起');
+    callFn(env, 'showControls')();
+    assert.strictEqual(bar.classList.contains('hide'), false, 'showControls 必须能重新显示控制栏');
+  });
+}
+
+// ============ 第五组之五：历史视图 ↔ 列表视图切换不串台 ============
+
+// 历史条目与列表条目共用 .playlist-item 类，但只有列表条目设 dataset.index。
+// 从历史视图切回列表时，若增量分支只认 class 不认 dataset.index，会把残余历史条目
+// 误当成"已有列表项"从而只做增量追加 → 列表前几行仍是历史条目（无序号/均衡器，点击跳历史）。
+async function playlistViewSwitchTest() {
+  const env = loadRenderer();
+  await waitForExtensions(env);
+  vm.runInContext(`
+    playlist = [
+      { target: 'D:\\\\v\\\\a.mp4', name: 'a.mp4', key: 'D:\\\\v\\\\a.mp4' },
+      { target: 'D:\\\\v\\\\b.mp4', name: 'b.mp4', key: 'D:\\\\v\\\\b.mp4' },
+      { target: 'D:\\\\v\\\\c.mp4', name: 'c.mp4', key: 'D:\\\\v\\\\c.mp4' }
+    ];
+    currentPlaylistIndex = 0;
+    localStorage.setItem('bb_player_history', JSON.stringify({
+      'D:\\\\v\\\\x.mp4': { t: 100, ts: 2000 },
+      'D:\\\\v\\\\y.mp4': { t: 200, ts: 1000 }
+    }));
+    playlistView = 'list';
+    renderPlaylist();
+  `, env.context);
+
+  ok('列表视图：条目带 dataset.index（作为后续断言的前提）', () => {
+    const idx = vm.runInContext(`playlistItemsContainer.children[0].dataset.index`, env.context);
+    assert.strictEqual(idx, '0', '列表条目必须带 dataset.index');
+  });
+
+  ok('切到历史视图再切回列表：首行必须是列表条目（不得残留历史条目）', () => {
+    vm.runInContext(`playlistView = 'list';`, env.context);
+    vm.runInContext(`togglePlaylistView();`, env.context); // list → history
+    const histFirst = vm.runInContext(`playlistItemsContainer.children[0].dataset.index`, env.context);
+    assert.strictEqual(histFirst, undefined, '历史条目不应带 dataset.index（前提校验）');
+    vm.runInContext(`togglePlaylistView();`, env.context); // history → list
+    const firstIdx = vm.runInContext(`playlistItemsContainer.children[0].dataset.index`, env.context);
+    assert.strictEqual(firstIdx, '0',
+      '切回列表视图后首行必须是列表条目；若为 undefined 说明增量分支把历史条目误当成了列表项');
+    const count = vm.runInContext(`playlistItemsContainer.children.length`, env.context);
+    assert.strictEqual(count, 3, '列表条目数必须与 playlist 一致（3 条）');
+  });
+}
+
 // 拖入字幕的令牌校验：解码是两次 await 的异步链，期间用户可能已切到别的视频。
 // 拖入时记下当时的视频路径，应用前不一致必须丢弃，且不得污染 manualSubtitleFor
 // （否则新片的同名自动字幕会被永久压制）。
@@ -1134,6 +1233,8 @@ async function playlistIncrementalRenderTest() {
   await playlistTest();
   await okAsync('播放失败熔断：全部失败即停止自动跳集，单循环不跳集，换片解除单条拉黑', failureFallbackTest);
   await okAsync('纯音频音乐模式判定与误判自愈', musicAndDurationTest);
+  controlsAutoHideTest();
+  await playlistViewSwitchTest();
   await fallbackTest();
   await okAsync('拖入字幕解码期间换片：旧字幕不得挂上新视频、不得污染手动优先标记', dragSubtitleRaceTest);
   await okAsync('scheduleAudioCheck：同路径重新加载（loadSequence 已变）后不得再触发探测', audioCheckSequenceTest);

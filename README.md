@@ -6,7 +6,7 @@
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-1.9.0-ff3b4e?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.9.1-ff3b4e?style=for-the-badge)
 
 **A pure, lightweight, high-polish borderless media player for Windows**
 
@@ -85,7 +85,7 @@ All 25 formats open with a double-click. Formats Chromium handles natively play 
 
 - Progress is shown live in the UI ("正在换容器… 45%"), switching files cancels it, and converted output is cached — **the second open is instant**.
 - If probing says "playable" but the engine produces no picture or no sound, BBPlayer automatically falls back to transcode / audio-fix (runtime fallback, once per file).
-- The bundled converter is an **LGPL build of FFmpeg**, invoked as a separate process (no linking, no modification); its licence text ships with the app. If it is missing, BBPlayer degrades gracefully — those legacy formats report a clear error, everything else is unaffected.
+- The bundled converter is a **trimmed, self-compiled LGPL build of FFmpeg** (a single ~14MB static binary; full builds are ~150MB), invoked as a separate process (no linking, no modification); its licence text ships with the app. If it is missing, BBPlayer degrades gracefully — those legacy formats report a clear error, everything else is unaffected.
 
 ---
 
