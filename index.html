@@ -884,12 +884,14 @@
       z-index: 18;
       display: flex;
       flex-direction: column;
-      transition: right 0.35s cubic-bezier(0.16, 1, 0.3, 1);
-      box-shadow: var(--shadow-drawer);
+      transition: right 0.35s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s ease;
+      /* 关闭时投影设为全透明：面板只是平移到窗口外，投影仍会渗进窗口右边框形成黑边 */
+      box-shadow: -10px 0 30px rgba(0, 0, 0, 0);
     }
 
     #playlist-panel.open {
       right: 0;
+      box-shadow: var(--shadow-drawer);
     }
 
     .playlist-header {

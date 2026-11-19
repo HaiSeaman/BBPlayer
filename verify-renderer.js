@@ -1176,6 +1176,32 @@ async function resumeStillWorksTest() {
     `有历史记录的视频在 loadedmetadata 后应触发续播提示（pendingResumeTime 应为 120，实际 ${pendingResume}）`);
 }
 
+// 续播提示的自动消失规则：10 秒无操作隐藏；鼠标悬停暂停倒计时，移开重新计时；
+// 手动隐藏/重新显示都不能残留旧计时器（否则新提示会被旧计时器提前关掉）。
+function resumeToastAutoHideTest() {
+  const env = loadRenderer();
+  assert.ok(!env.topLevelError, '顶层脚本必须无错');
+  const toast = env.byId('resume-toast');
+  assert.ok(toast, '续播提示元素必须存在');
+
+  callFn(env, 'showResumeToast()');
+  assert.strictEqual(toast.style.display, 'flex', '显示后应为 flex');
+  assert.ok(hasTimer(env, 10000), '显示后应挂上 10 秒自动隐藏计时器');
+
+  toast.dispatch('mouseenter');
+  assert.ok(!hasTimer(env, 10000), '鼠标悬停时应暂停倒计时');
+
+  toast.dispatch('mouseleave');
+  assert.ok(hasTimer(env, 10000), '鼠标移开后应重新开始 10 秒倒计时');
+  runTimers(env, 10000);
+  assert.strictEqual(toast.style.display, 'none', '10 秒到期后应自动隐藏');
+
+  callFn(env, 'showResumeToast()');
+  callFn(env, 'hideResumeToast()');
+  assert.ok(!hasTimer(env, 10000), '手动隐藏应清掉计时器');
+}
+
+
 // renderPlaylist 的增量渲染：向已有列表追加新条目时，已有条目的 DOM 节点必须原样保留
 // （节点身份不变），只有新条目被 append。全量 innerHTML='' 重建会：
 // 1) 大列表拖入秒级卡顿（每条目 10 个节点 + 3 段 SVG 字符串重复解析）；
@@ -1240,6 +1266,7 @@ async function playlistIncrementalRenderTest() {
   await okAsync('scheduleAudioCheck：同路径重新加载（loadSequence 已变）后不得再触发探测', audioCheckSequenceTest);
   await okAsync('快速连切视频：被打断的加载不得残留 loadedmetadata/error 监听器', loadListenerLeakTest);
   await okAsync('监听器单例化后续播功能不坏：有历史的视频 loadedmetadata 仍触发续播提示', resumeStillWorksTest);
+  ok('续播提示：10 秒无操作自动隐藏，悬停暂停倒计时', resumeToastAutoHideTest);
 
   console.log('');
   if (failures.length > 0) {

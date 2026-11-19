@@ -156,6 +156,8 @@ let controlsIdleTimer = null; // 底部功能栏 3 秒闲置兜底计时器
 const CONTROLS_HOTZONE_HEIGHT = 120; // 底部感应区高度（像素）：鼠标进入此范围功能栏才出现
 const TITLEBAR_HOTZONE_HEIGHT = 56; // 顶部感应区高度（像素）：标题栏 42px + 14px 余量，鼠标接近顶部即唤出
 let toastTimer = null;
+let resumeToastTimer = null; // 续播提示 10 秒无操作自动消失计时器
+const RESUME_TOAST_AUTO_HIDE_MS = 10000;
 let clickTimer = null; // 单击/双击区分计时器
 let lastVolume = 1.0;
 // 鼠标最近一次在窗口内的纵向坐标（clientY）。播放开始自动收起控制栏时用它判断
@@ -698,7 +700,7 @@ async function loadAndPlayVideo(filePathOrFile) {
 
   // 重置续播状态（新视频不沿用上一部的续播提示）
   pendingResumeTime = 0;
-  if (resumeToast) resumeToast.style.display = 'none';
+  hideResumeToast();
 
   // 重置进度打卡基准（防止新旧视频秒数撞车丢一次保存）
   lastSavedProgressSec = -1;
@@ -808,6 +810,21 @@ async function checkAndAutoLoadSubtitles(basePath) {
 }
 
 // 检查播放历史与续播弹窗
+function hideResumeToast() {
+  if (resumeToastTimer) {
+    clearTimeout(resumeToastTimer);
+    resumeToastTimer = null;
+  }
+  if (resumeToast) resumeToast.style.display = 'none';
+}
+
+function showResumeToast() {
+  if (!resumeToast) return;
+  resumeToast.style.display = 'flex';
+  if (resumeToastTimer) clearTimeout(resumeToastTimer);
+  resumeToastTimer = setTimeout(hideResumeToast, RESUME_TOAST_AUTO_HIDE_MS);
+}
+
 function checkHistoryResume(pathKey) {
   if (!pathKey) return;
   const history = loadHistory();
@@ -815,14 +832,14 @@ function checkHistoryResume(pathKey) {
   if (saved && saved.t >= 5) {
     // 过滤播放已接近完结 (剩余 < 8s 或进度 > 95%) 的记录，避免进入即结束
     if (video.duration && (video.duration - saved.t < 8 || saved.t / video.duration > 0.95)) {
-      if (resumeToast) resumeToast.style.display = 'none';
+      hideResumeToast();
       return;
     }
     pendingResumeTime = saved.t;
     if (resumeTimeText) resumeTimeText.textContent = formatTime(saved.t);
-    if (resumeToast) resumeToast.style.display = 'flex';
+    showResumeToast();
   } else {
-    if (resumeToast) resumeToast.style.display = 'none';
+    hideResumeToast();
   }
 }
 
@@ -1287,7 +1304,7 @@ function resetPlayerToEmpty() {
   revokeCurrentBlobUrl();
   if (customSubtitle) customSubtitle.style.display = 'none';
   lastRenderedSubText = null; // 清空缓存文案：否则换片后首句若与上一部末句同文会被判为"无需重绘"而漏显
-  if (resumeToast) resumeToast.style.display = 'none';
+  hideResumeToast();
   video.src = '';
   video.load();
   exitMusicMode(); // 清空播放器时撤掉音乐效果层，避免残留
@@ -2266,13 +2283,28 @@ if (resumeBtn) {
       video.currentTime = pendingResumeTime;
       showToast(`已为您自动续播至 ${formatTime(pendingResumeTime)}`);
     }
-    if (resumeToast) resumeToast.style.display = 'none';
+    hideResumeToast();
   });
 }
 
 if (closeToastBtn) {
   closeToastBtn.addEventListener('click', () => {
-    if (resumeToast) resumeToast.style.display = 'none';
+    hideResumeToast();
+  });
+}
+
+// 鼠标停留在续播提示上时暂停 10 秒倒计时，移开后重新计时，避免还没看完就消失
+if (resumeToast) {
+  resumeToast.addEventListener('mouseenter', () => {
+    if (resumeToastTimer) {
+      clearTimeout(resumeToastTimer);
+      resumeToastTimer = null;
+    }
+  });
+  resumeToast.addEventListener('mouseleave', () => {
+    if (resumeToast.style.display !== 'none' && !resumeToastTimer) {
+      resumeToastTimer = setTimeout(hideResumeToast, RESUME_TOAST_AUTO_HIDE_MS);
+    }
   });
 }
 

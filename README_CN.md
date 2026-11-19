@@ -6,7 +6,7 @@
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-1.9.1-ff3b4e?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.9.2-ff3b4e?style=for-the-badge)
 
 **纯粹、轻量、高颜值的 Windows 无边框本地多媒体播放器**
 
