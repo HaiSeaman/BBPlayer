@@ -21,7 +21,7 @@ const pkg = JSON.parse(read('package.json'));
 
 // 1) 打包清单必须覆盖所有运行必需文件（漏一个就是"安装后才崩"）
 const REQUIRED_IN_PACKAGE = [
-  'main.js', 'preload.js', 'renderer.js', 'converter.js', 'index.html',
+  'main.js', 'preload.js', 'renderer.js', 'converter.js', 'updater.js', 'index.html',
   'shared-video-exts.js', 'shared-subtitle-exts.js', 'package.json'
 ];
 const missingPacked = REQUIRED_IN_PACKAGE.filter(f => !pkg.build.files.includes(f));
@@ -136,6 +136,33 @@ assert.deepStrictEqual(missingRefs, [], `index.html 引用了不存在的文件:
     assert.ok(!expBlock.includes(sym), `${sym} 不应再出现在导出里（无任何消费者）`);
   }
   assert.ok(expBlock.includes('NATIVE_EXTS'), 'NATIVE_EXTS 必须保留导出（verify-converter.js 在用）');
+}
+
+// 9) 更新检查：版本比较与安装包选择是纯函数，直接跑真值表；
+//    再静态盯住"主进程确实调用了检查"（写了模块却忘了调用 = 功能等于不存在）。
+{
+  const updater = require('./updater');
+  assert.strictEqual(updater.isNewer('1.10.0', '1.9.2'), true, '1.10.0 应比 1.9.2 新');
+  assert.strictEqual(updater.isNewer('1.9.10', '1.9.9'), true, '1.9.10 应比 1.9.9 新（按数字段比较）');
+  assert.strictEqual(updater.isNewer('v1.9.3', '1.9.2'), true, 'v 前缀与稍高版本应判定为新');
+  assert.strictEqual(updater.isNewer('1.9.2', '1.9.2'), false, '同版本必须判定为无更新（否则每次启动都弹窗）');
+  assert.strictEqual(updater.isNewer('1.9.1', '1.9.2'), false, '旧版本不能判定为新');
+  const assets = [
+    { name: 'BBPlayer.9.9.9.exe', browser_download_url: 'portable' },
+    { name: 'BBPlayer.Setup.9.9.9.exe', browser_download_url: 'setup' }
+  ];
+  assert.strictEqual(updater.pickAsset(assets, true).browser_download_url, 'portable', '便携版应下载免安装包');
+  assert.strictEqual(updater.pickAsset(assets, false).browser_download_url, 'setup', '安装版应下载 Setup');
+  assert.strictEqual(updater.pickAsset([], true), null, '找不到安装包要返回 null（由调用方退回发布页）');
+  assert.ok(/updater\.checkForUpdates\(mainWindow\)/.test(mainSrc),
+    'main.js 启动流程必须真的调用 updater.checkForUpdates(mainWindow)');
+  // 便携版更新必须走 relaunch：直接 spawn 新 exe 会撞上本进程的单实例锁，新实例秒退（表现为“更新完没反应”）
+  const upSrc = read('updater.js');
+  assert.ok(/app\.relaunch\(\{\s*execPath:\s*dest/.test(upSrc),
+    '便携版更新必须用 app.relaunch({ execPath: dest })，否则新实例会被单实例锁顶掉');
+  // 安装包文件名来自网络，必须取 basename 后再拼路径（防 ../ 目录穿越）
+  assert.ok(/path\.basename\(asset\.name\)/.test(upSrc),
+    '下载路径必须对 asset.name 取 basename（防路径穿越）');
 }
 
 console.log(`[OK] 端到端接线对账通过：打包清单 ${REQUIRED_IN_PACKAGE.length} 个必需文件齐全；` +

@@ -219,8 +219,9 @@
       width: min(34vh, 280px);
       height: min(34vh, 280px);
       border-radius: 22px;
+      /* --shadow-cover 本身就是完整的阴影值，不能再前置偏移量，否则整条声明非法（阴影全丢） */
       box-shadow:
-        0 26px 70px var(--shadow-cover),
+        var(--shadow-cover),
         0 0 90px var(--cover-glow, rgba(64, 128, 255, 0.2)),
         0 0 0 1px var(--cover-ring);
       background: var(--cover-frame);
@@ -624,17 +625,22 @@
       box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
     }
 
-    /* 播放功能栏按钮组 */
+    /* 播放功能栏按钮组。
+       flex-wrap + row-gap：窗口窄到装不下一排时自动换行，而不是把按钮挤出胶囊面板 */
     .controls-row {
       display: flex;
       justify-content: space-between;
       align-items: center;
+      flex-wrap: wrap;
+      row-gap: 8px;
     }
 
     .controls-left, .controls-right {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 8px; /* 同时含行/列间距，无需再单独写 row-gap */
+      flex-wrap: wrap;
+      min-width: 0;
     }
 
     /* 职能分组细分隔线：画面设置 · 音量 · 工具 · 视图 */
@@ -657,6 +663,8 @@
       display: flex;
       align-items: center;
       justify-content: center;
+      /* 不参与压缩：旧版窄窗口下按钮会被 flex 挤扁，图标变形、点击区错位 */
+      flex: 0 0 auto;
       width: 34px;
       height: 34px;
       border-radius: var(--r-sm);
@@ -734,6 +742,9 @@
       font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
       margin-left: 4px;
       letter-spacing: 0.5px;
+      /* 时间必须整段不折行、不被压缩，否则窄窗口下会变成两行把按钮顶歪 */
+      white-space: nowrap;
+      flex-shrink: 0;
     }
 
     /* 音量调控弹窗 */
@@ -742,6 +753,7 @@
       display: flex;
       align-items: center;
       gap: 6px;
+      flex-shrink: 0;
     }
 
     .volume-slider-wrapper {
@@ -766,6 +778,7 @@
     /* 浮动下拉菜单组件 (倍速、字幕、画面比例) */
     .menu-popover-container {
       position: relative;
+      flex: 0 0 auto;
     }
 
     .popover-menu {
@@ -1092,16 +1105,97 @@
       line-height: 1.6;
     }
 
-    /* 键盘可达性：仅键盘导航时显示焦点环 */
-    button:focus-visible,
-    .menu-item:focus-visible,
-    .resume-btn:focus-visible {
+    /* 键盘可达性：仅键盘导航时显示焦点环（只对真正可聚焦的按钮生效；
+       .menu-item / .resume-btn 是 div/span 且没有 tabindex，永远拿不到焦点，规则已删） */
+    button:focus-visible {
       outline: 2px solid var(--accent-text);
       outline-offset: 2px;
     }
 
     button:focus:not(:focus-visible) {
       outline: none;
+    }
+
+    /* ===== 窄窗口自适应：底部功能栏 =====
+       背景：功能栏宽度跟着窗口走（calc(100% - 48px)），但内部按钮是固定尺寸且原本不换行。
+       窗口窄到比"一整排按钮的固有宽度"还小时，按钮就会溢出胶囊面板、被窗口边缘裁掉（UI 错位）。
+       处理思路：先让各分组可换行、按钮不被压扁；再按窗口宽度逐级收紧间距和控件尺寸；
+       一排确实放不下时（≤920px）改为上下两排居中排布，保证所有按键始终留在面板内。 */
+    @media (max-width: 920px) {
+      #controls-overlay {
+        padding: 12px;
+        gap: 8px;
+      }
+      /* 一排放不下：左右两组改为上下两排居中，避免横向溢出 */
+      .controls-row {
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+      }
+      .controls-left, .controls-right {
+        justify-content: center;
+        row-gap: 8px;
+        max-width: 100%;
+      }
+      /* 上下排布后分隔线只会制造断行空隙，直接隐藏 */
+      .ctrl-divider {
+        display: none;
+      }
+      .volume-slider-wrapper {
+        width: 56px;
+      }
+      /* 功能栏变高后，字幕与续播提示同步上移，否则会被面板遮住 */
+      #custom-subtitle-overlay,
+      #resume-toast {
+        bottom: 150px;
+      }
+    }
+
+    /* 更窄（≤600 留足余量，最小窗口 480px）：整体再缩一档，保证每组仍是单排、按键清晰可点 */
+    @media (max-width: 600px) {
+      #controls-overlay {
+        width: calc(100% - 24px);
+        bottom: 12px;
+        padding: 8px 10px;
+        gap: 6px;
+      }
+      .controls-row,
+      .controls-left,
+      .controls-right {
+        gap: 6px;
+      }
+      .ctrl-btn {
+        width: 30px;
+        height: 30px;
+      }
+      .ctrl-btn svg {
+        width: 16px;
+        height: 16px;
+      }
+      #btn-play {
+        width: 34px;
+        height: 34px;
+      }
+      #btn-play svg {
+        width: 20px;
+        height: 20px;
+      }
+      .ctrl-btn.text-btn {
+        padding: 0 6px;
+        font-size: 11px;
+      }
+      .time-display {
+        font-size: 11px;
+      }
+      .volume-slider-wrapper {
+        width: 44px;
+      }
+      /* 弹层默认相对按钮水平居中；最左侧的倍速菜单在最小窗口下会越出窗口 4px 被裁，
+         这里给它一个右移补偿。只改 margin 不改 transform：transform 参与过渡，
+         若在这里覆盖 translateX，跨断点时会看到菜单横向滑动一下 */
+      .controls-right > .menu-popover-container:first-child .popover-menu {
+        margin-left: 8px;
+      }
     }
 
     /* 尊重系统"减少动态效果"偏好 */

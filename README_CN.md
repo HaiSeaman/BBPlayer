@@ -6,7 +6,7 @@
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-1.9.2-ff3b4e?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.10.0-ff3b4e?style=for-the-badge)
 
 **纯粹、轻量、高颜值的 Windows 无边框本地多媒体播放器**
 
@@ -64,6 +64,14 @@
 ### 🎨 外观
 - **浅色 / 深色双主题**一键切换；语义化 CSS 变量保证两套主题下文字与控件始终清晰；主题选择自动记忆。
 - **25 种媒体格式文件关联**（其中 11 种由内置转换器自动转换后播放）、单实例锁、窗口大小/位置记忆（含最大化状态）。
+- **窄窗口自适应**：窗口拖窄时底部功能栏自动收紧间距与按钮尺寸；一排装不下时改为上下两排居中，
+  所有按键始终留在面板内，不会被窗口边缘裁掉或错位。
+
+### 🔄 自动更新
+- **启动时静默检查新版本**（约 3 秒后、后台进行）；**没有更新就完全不打扰**，断网/超时同样静默。
+- **有更新才弹窗**，由你决定「确定更新」还是「取消」；确定后自动下载安装包并启动安装程序，
+  任务栏图标显示下载进度。
+- 安装版直接交给 Setup 覆盖安装；便携版把新版下载到软件所在文件夹并自动启动（旧文件可自行删除）。
 
 ---
 
@@ -145,6 +153,7 @@ BBPlayer/
 ├── preload.js              # 上下文隔离桥接（contextBridge → window.electronAPI）
 ├── renderer.js             # 渲染层全部业务：播放状态机、字幕引擎、手势、频谱、主题
 ├── converter.js            # 媒体兼容层：探测 + 三档转换 + 缓存 + 并发队列
+├── updater.js              # 启动更新检查：GitHub Release 比对 + 下载安装包 + 启动安装程序
 ├── index.html              # 单文件视图：DOM + 全部 CSS（语义变量、双主题、彩虹色标）
 ├── shared-video-exts.js    # 单一事实来源：视频/音频扩展名列表
 ├── shared-subtitle-exts.js # 单一事实来源：字幕扩展名列表
@@ -158,7 +167,7 @@ BBPlayer/
 
 **设计原则**
 - **运行时零依赖**——仅 `electron` 与 `electron-builder` 两个 devDependencies。
-- **单文件渲染层**——每个窗口一份 `renderer.js`（约 2400 行），状态完全隔离。
+- **单文件渲染层**——每个窗口一份 `renderer.js`（约 2760 行），状态完全隔离。
 - **加固的 IPC**——所有处理器经受信窗口集合校验发送方（`isTrustedSender`）；页面导航、`window.open` 与非顶层 frame 一律封死。
 - **扩展名单一来源**——媒体/字幕扩展名列表收敛于共享模块，两进程经 IPC 共享，由 `npm run verify` 自动对账。
 

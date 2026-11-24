@@ -41,6 +41,7 @@ const videoExtensions = new Set(VIDEO_EXTS.all.map(ext => '.' + ext));
 // 三档处理后喂给同一个 <video>：能播就不动、只差容器就换壳（秒级）、编码不行才重编码。
 // 决策规则与实测数据见 docs/FORMAT-EXPANSION-REPORT.md；缺 ffmpeg 时自动降级（这些文件仍会播失败并如实提示）。
 const converter = require('./converter');
+const updater = require('./updater'); // 启动时静默检查 GitHub 新版本（无更新不打扰）
 converter.configure({
   ffmpegPath: app.isPackaged
     ? path.join(process.resourcesPath, 'ffmpeg', 'ffmpeg.exe')   // 打包后由 extraResources 放到 resources/ffmpeg
@@ -223,10 +224,7 @@ function createPlayerWindow(options = {}) {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', (e) => e.preventDefault());
 
-  // 优雅加载
-  win.once('ready-to-show', () => {
-    win.show();
-  });
+  // 优雅加载（窗口本身以 show:true 立即显示，这里不再重复 show）
 
   // 监听窗口最小化与恢复事件（渲染进程据此自动暂停/续播）
   win.on('minimize', () => {
@@ -286,8 +284,8 @@ function createPlayerWindow(options = {}) {
       scheduleStateSave();
     });
 
-    // 主窗口"关闭"= 直接退出软件；退出前取消挂起的防抖保存并强制落盘一次窗口状态
-    // （避免最后一次移动/缩放因防抖还没到点而丢失）
+    // 主窗口关闭时把窗口状态强制落盘（取消挂起的防抖保存，避免最后一次移动/缩放丢失）。
+    // 退出软件由 window-all-closed 统一负责（可能还有别的播放器窗口开着）。
     win.on('close', () => {
       if (stateSaveTimer) {
         clearTimeout(stateSaveTimer);
@@ -317,6 +315,9 @@ function isTrustedSender(event) {
 
 // 软件准备就绪
 app.whenReady().then(() => {
+  // 没抢到单实例锁的进程已经在上面退出中：这里必须直接返回，
+  // 否则第二个实例仍可能抢先建出窗口、跑一遍缓存清理和更新检查（表现为"闪一下黑窗"）。
+  if (!gotTheLock) return;
   mainWindow = createPlayerWindow({ isMain: true });
   // 启动时清一次缓存（残留的 .part.mp4 碎片 + 超过上限的旧产物），失败不影响使用
   converter.cleanup(true);
@@ -325,6 +326,9 @@ app.whenReady().then(() => {
       console.warn('[BBPlayer] 未找到内置转换器，avi/flv/wmv/ts/rmvb 等格式将无法播放：', converter.ffmpegPath());
     }
   });
+  // 延后 3 秒再查更新：避免和启动期的 ffmpeg 探测/首帧渲染抢网络与主线程；
+  // 只有发现新版本才会弹窗，没有更新或检查失败都保持安静。
+  setTimeout(() => updater.checkForUpdates(mainWindow), 3000);
 });
 
 // 退出前杀掉正在跑的 ffmpeg，避免留下孤儿进程一直占 CPU
@@ -492,8 +496,9 @@ ipcMain.handle('file:findCover', async (event, filePath) => {
       }
       // 0 字节的坏图（下载失败/占位文件）必须跳过，否则它会把后面真正有效的候选封面顶掉
       if (!stat.isFile() || stat.size === 0) continue;
+      // 候选名只来自 COVER_FILENAMES 与 jpg/jpeg/png/webp，mime 正常情况下必存在（保留判断以防清单以后扩容漏配）
       const mime = COVER_MIME[path.extname(p).toLowerCase()];
-      if (mime && stat.size > 0 && stat.size <= MAX_COVER_BYTES) {
+      if (mime && stat.size <= MAX_COVER_BYTES) {
         try {
           const buf = await fs.promises.readFile(p);
           return `data:${mime};base64,${buf.toString('base64')}`;
@@ -700,11 +705,14 @@ ipcMain.handle('dialog:saveScreenshot', async (event, payload) => {
   if (!payload || typeof payload !== 'object' || !(payload.data instanceof ArrayBuffer)) return false;
   if (payload.data.byteLength === 0 || payload.data.byteLength > MAX_SCREENSHOT_BYTES) return false;
   const { data, defaultName } = payload;
-  // 默认文件名校验：仅接受纯文件名（去路径分隔符），防止恶意名字带目录穿越进默认保存路径
+  // 默认文件名校验：仅接受纯文件名（去路径分隔符与 Windows 非法字符），防止恶意名字带目录穿越进默认保存路径
   let safeName = 'BBPlayer_Screenshot.png';
   if (typeof defaultName === 'string' && defaultName) {
-    const base = defaultName.replace(/[\\/]/g, '_').trim();
-    if (base) safeName = base;
+    const base = defaultName
+      .replace(/[\\/:*?"<>|]/g, '_') // 路径分隔符、盘符冒号、Windows 文件名禁用字符
+      .replace(/[. ]+$/, '')          // Windows 会静默丢掉结尾的点和空格
+      .trim();
+    if (base && base !== '.' && base !== '..') safeName = base;
   }
 
   const result = await dialog.showSaveDialog(win, {

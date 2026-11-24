@@ -21,6 +21,9 @@ for (const [group, list] of Object.entries(groups)) {
     seen.add(e);
   }
 }
+// nativeAll 是 converter 的"内核直接可播"快速通道依据（video + audio），必须是两者之和
+assert.deepStrictEqual(exts.nativeAll, [...exts.video, ...exts.audio],
+  'nativeAll 必须严格等于 video + audio（converter 的快速通道完全依赖它）');
 
 // 2) 与 package.json 的 fileAssociations 对账（成员一致即可，不看顺序）
 const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));

@@ -11,8 +11,9 @@
 BBPlayer/
 ├── main.js                 # Electron 主进程：多窗口工厂/状态记忆、IPC 信任面、文件对话框、目录扫描、媒体兼容层接线
 ├── preload.js              # 预加载脚本：contextBridge 暴露 electronAPI（渲染进程唯一系统入口）
-├── renderer.js             # 渲染层全部业务逻辑（约 2400 行，单文件策略，每窗口一份独立实例）
+├── renderer.js             # 渲染层全部业务逻辑（约 2760 行，单文件策略，每窗口一份独立实例）
 ├── converter.js            # 媒体兼容层：探测 + 三档转换（换容器/换音频/重编码）+ 缓存 + 并发队列（v1.8.0 新增）
+├── updater.js              # 启动时静默检查 GitHub Release，有新版本才弹窗并下载安装包（v1.10.0 新增）
 ├── index.html              # 界面结构 + 全部内联 CSS（"安静玻璃"低占用视觉 + 彩虹品牌体系 + 音乐播放效果层）
 ├── shared-video-exts.js    # 媒体扩展名单一事实来源：{ video, convertibleVideo, audio, all, nativeAll }
 ├── shared-subtitle-exts.js # 字幕扩展名单一事实来源：['srt','vtt','ass','ssa']（v1.6.1 新增）
@@ -28,7 +29,7 @@ BBPlayer/
 ```
 
 **依赖纪律**：运行时零 npm 依赖；仅 `electron` 与 `electron-builder` 两个 devDependencies。
-扩展名单一事实来源有两份（v1.6.1 起）：`shared-video-exts.js`（结构化 `video/audio/all`）与
+扩展名单一事实来源有两份（v1.6.1 起）：`shared-video-exts.js`（结构化 `video / convertibleVideo / audio / all / nativeAll`）与
 `shared-subtitle-exts.js`（`['srt','vtt','ass','ssa']`）。主进程直接 require 两者；
 preload（沙箱无法 require 本地模块）与渲染进程经 IPC `app:getVideoExtensions` 获取同一份数据
 （返回值含 `subtitle` 字段）。此前字幕白名单在主/渲染进程共 4 处硬编码，已全部收敛。
@@ -538,7 +539,124 @@ npm run verify
 
 ---
 
+### 21. 启动更新检查与自动安装（v1.10.0 新增）
+
+**目标**：打开软件后自动检查有没有新版本；没有更新就不打扰，有更新才弹窗由用户决定。
+
+**数据来源**：GitHub Releases API（`api.github.com/repos/HaiSeaman/BBPlayer/releases/latest`）。
+仓库公开、无需 token；每次启动只请求 1 次（未认证限流 60 次/小时/IP，足够用）。
+
+**为什么不用 electron-updater**：本项目的发布物里没有 `latest.yml`，引入 electron-updater 还要改发布流程、
+增加一批运行时依赖，与"运行时零依赖"纪律冲突。`updater.js` 只用 Electron 自带的 `net.fetch`
+完成"读 Release → 比版本 → 下载 → 启动安装器"。
+
+**流程**（`main.js` 在 `app.whenReady` 成功后 `setTimeout(..., 3000)` 调用一次，避免和启动期抢资源）：
+
+1. 拉最新 Release 取 `tag_name`，与 `app.getVersion()` 做**数字段比较**（`1.9.10 > 1.9.9`，忽略 `v` 前缀）；
+2. 不新于当前版本 → 直接返回，**不弹任何窗**；断网/限流/解析失败同样静默（只写 console）；
+3. 有新版本 → 原生对话框「确定更新 / 取消」，取消即结束；
+4. 选安装包：便携版（存在 `PORTABLE_EXECUTABLE_FILE`）取 `BBPlayer.<ver>.exe`，安装版取 `Setup` 包；
+   找不到对应资源就退回浏览器打开发布页；
+5. 流式下载（不整包进内存），任务栏图标显示进度，30 分钟超时兜底，并用 Release 里的 `size` 校验完整性；
+6. 收尾：
+   - **便携版**必须 `app.relaunch({ execPath })` 再退出——直接 spawn 新 exe 会撞上本进程的单实例锁，
+     新实例秒退（症状是"更新完毫无反应"）；新版下载到旧文件旁边，旧 exe 由用户自行删除；
+   - **安装版**启动 Setup 后退出。Windows 上 `spawn` 无效 exe 会**同步抛错**，必须 try/catch；
+     启动失败要留在软件里报错，不能"退出又没装上"。
+
+**边界与安全**：下载地址只来自固定仓库的 Release；文件名取 `path.basename` 防目录穿越；只接受 HTTPS；
+不做数字签名校验（已知风险：仓库账号被盗时可能下发恶意安装包，靠主人保管好 GitHub 账号）。
+
+**测试**：`verify-wiring.js` 用真值表锁住版本比较与安装包选择，并静态盯住三件事——
+主进程确实调用了检查、便携版确实用 `relaunch`、下载路径确实取了 `basename`。
+
+---
+
 ## 三、版本变更明细
+
+### v1.10.0——窄窗口 UI 自适应 + 启动自动检查更新 + 全量审查修复
+
+> 本节记录 v1.10.0 相对 v1.9.2 的实际改动。**无存储格式变化**，覆盖安装即可，
+> 设置 / 播放列表 / 观看历史全部保留。
+
+#### A. 修复：窗口缩小后底部功能栏溢出（用户报告的 UI 错位）
+
+**现象**：把播放窗口拖窄，底部悬浮功能栏里的按钮不跟着收，窄到一定程度后按钮冲出胶囊面板、
+被窗口边缘裁掉（UI 错位）。
+
+**根因**：面板宽度跟随窗口（`calc(100% - 48px)`），但内部按钮是固定尺寸、且那一排 `flex` **不允许换行**。
+实测整排固有宽度约 787px，因此窗口窄过约 870px 就开始互相挤压；480px 时右侧按钮组比面板宽出 **305px**，
+其中 **281px 跑出窗口**被裁。
+
+**修复**（CSS，`index.html`）：
+
+- 按钮 / 时间 / 下拉容器统一 `flex: 0 0 auto` 与 `white-space: nowrap`——空间不够时不再被压扁变形；
+- 分组允许 `flex-wrap` 兜底换行；
+- `@media (max-width: 920px)`：左右两组改为**上下两排居中**，隐藏装饰性分隔线，音量滑块收窄；
+- `@media (max-width: 600px)`：再缩一档（按钮 30px、间距 6px、面板留白减小），保证每组仍是单排；
+- 面板变高后，字幕层与续播提示同步上移到 `bottom: 150px`，不被面板遮住；
+- 最小窗口下最左侧的倍速菜单加 8px 右移补偿，避免弹层被窗口边缘裁掉 4px。
+
+**验证**：无界面实测 1280 / 1000 / 960 / 921 / 920 / 900 / 861 / 760 / 700 / 620 / 601 / 600 / 561 / 560 / 520 / 480
+共 16 档宽度：按钮溢出 **0**、出窗 **0**、面板自身内容溢出 **0**，右侧按钮组始终单排
+（栏高 80 → 120 → 98，随断点变化）。
+
+#### B. 新功能：启动自动检查更新
+
+详见第二章第 21 节。要点：无更新静默、有更新弹窗确认、确认后自动下载并启动安装包；
+便携版与安装版分别处理；所有失败都不影响播放。
+
+#### C. 全量审查修复的 11 个缺陷
+
+| # | 缺陷 | 根因 / 修法 |
+|---|---|---|
+| 1 | 转码兜底成功后画面停住，图标还显示"播放中" | 改 `src` + `load()` 会让元素回到暂停态，且**实测不触发 `pause` 事件** → 换源前记住是否在播，换源后恢复 `play()` |
+| 2 | 软件已开着时双击另一个视频毫无反应 | 旧逻辑只在"文件已在列表里"时切播 → 双击/选择文件打开一律切播；同时避免空列表"自动播 + 显式播"叠加成两次加载 |
+| 3 | 清空播放列表后，空窗口里标题栏也会自动隐藏 | `video.src = ''` 会被 URL 解析成文档地址（实测拿回 `index.html`），旧 `!!video.src` 判空失效 → 改用 `isVideoLoaded` |
+| 4 | 右键点进度条也会跳转 | `mousedown` 未判按键 → 只响应左键 |
+| 5 | 音乐封面阴影 / 光晕 / 描边全部消失 | `0 26px 70px var(--shadow-cover)` 里变量本身是完整阴影值，拼接后整条声明非法 → 改为 `var(--shadow-cover), …` |
+| 6 | 第二个实例可能"闪一下黑窗"并重复跑清理与更新检查 | `app.whenReady` 写在单实例锁分支外 → 未抢到锁直接 return |
+| 7 | 便携版点"确定更新"后毫无反应 | 新 exe 先启动会撞上旧进程的单实例锁 → 改用 `app.relaunch` |
+| 8 | 更新下载遇连接半开时永远卡住 | `net.fetch` 无超时 → 30 分钟兜底（约 57KB/s 也能下完 100MB） |
+| 9 | 更新包路径 / 完整性可被发布信息利用 | 直接用网络来的文件名拼路径、只比 content-length → `path.basename` + Release `size` 校验 |
+| 10 | 截图默认名可能带 `:` 等 Windows 非法字符 | 只替换了斜杠 → 统一替换非法字符、去掉结尾点/空格、挡掉 `.` 与 `..` |
+| 11 | 转码缓存可能删掉正在播的产物（拖进度失败） | 只按"最后 prepare 时间"淘汰 → 最近 10 分钟用过的产物不淘汰 |
+
+#### D. 死代码与重复代码清理
+
+- `index.html`：删除永不命中的 `.menu-item:focus-visible` / `.resume-btn:focus-visible`（div/span 没有 tabindex，
+  实测 `tabIndex === -1`）；删掉与 `gap` 重复的 `row-gap`；删掉与 `show: true` 重复的 `ready-to-show → win.show()`；
+- `main.js`：封面查找里重复的 `stat.size > 0`；主窗口关闭处与真实行为不符的注释；
+- `converter.js` / `updater.js`：移除无外部消费者的导出（`availableEncoders`、`fetchLatestRelease`、`downloadFile`）；
+- `renderer.js`：把两个逐字相同的"打开文件夹"按钮处理器合并为一个循环；
+- 文档：`docs/DEVELOPER.md` 的扩展名键列表更正为 `video / convertibleVideo / audio / all / nativeAll`。
+
+#### E. 测试基建修复（重要：此前会"假通过"）
+
+- `verify-renderer.js` 有两个用例把 **async 函数**传给**同步 `ok()`**，断言失败只会变成未处理的 Promise 拒绝，
+  测试仍然打印"通过"。已改为 `await okAsync`；
+- 监听器泄漏断言由 `leaked <= 0` 改为 `strictEqual(leaked, 0)`（少挂监听器也属于回归）；
+- 测试桩里的扩展名清单改为直接 `require` 共享模块，避免"源码改了测试还绿"；
+- `verify-exts.js` 补上 `nativeAll === video + audio` 对账（converter 快速通道完全依赖它）；
+- 新增 3 条回归锁：兜底换源后保持播放/暂停状态、清空后不视为已加载媒体、双击打开只加载一次；
+- renderer 自检 **45 → 48 项**，`npm run verify` 全绿。
+
+#### F. 验证
+
+- `npm run verify`：扩展名对账、converter 35 项、renderer 48 项、接线对账（9 个打包文件 / 24 个 API / 18 发 5 收 IPC）全部通过；
+- 无界面实测：16 档窗口宽度下的功能栏布局；封面阴影计算样式恢复为三层合法值；
+  便携版更新链路（下载到同目录 → `relaunch` 指向新包 → 请求退出、无报错）；
+- 关键结论均有实测支撑：`video.src=''` 会解析成文档地址、改 `src` 不触发 `pause` 事件、
+  Windows 上 `spawn` 无效 exe 会同步抛错——三条都是先用无界面脚本跑出来的，再据此修复。
+
+#### G. 有意未改（评估后放弃，附理由）
+
+- 全局吞 `uncaughtException`：这是项目刻意的"播放器不许崩"策略，改成退出反而更糟；
+- 滚轮调音量每次落盘、resize / 进度条 mousemove 未做 rAF 合帧：微优化，收益小、改动面大；
+- `loadWindowState` 里两次 `getDisplayMatching`：去重只省一次启动调用，但那段是"窗口不能宽出屏幕"的
+  关键不变量，还有测试盯着具体写法，不动更安全；
+- 打开文件夹"读取失败"与"空文件夹"提示相同：要改 IPC 返回结构，收益低；
+- 音频管线建链失败后可能永久无声的极端路径：概率极低，改它要动整条音频链路。
 
 ### v1.9.2——右侧黑边修复 + 续播提示 10 秒自动消失
 
@@ -1426,7 +1544,7 @@ Electron 真实启动冒烟测试零报错。
 - 语法门禁必须**逐个文件**跑：`node --check` 只会检查第一个文件参数，写成
   `node --check main.js preload.js …` 时后面几个文件其实是被忽略的"假通过"。
   Windows PowerShell 写法（新增 JS 文件时**必须同步加进这个清单**）：
-  `Get-ChildItem main.js,preload.js,renderer.js,converter.js,shared-video-exts.js,shared-subtitle-exts.js,verify-exts.js,verify-converter.js,verify-renderer.js,verify-wiring.js | ForEach-Object { node --check $_.FullName }`；
+  `Get-ChildItem main.js,preload.js,renderer.js,converter.js,updater.js,shared-video-exts.js,shared-subtitle-exts.js,verify-exts.js,verify-converter.js,verify-renderer.js,verify-wiring.js | ForEach-Object { node --check $_.FullName }`；
 - `node verify-exts.js`：扩展名一致性对账（`shared-video-exts.js` ↔ `package.json` 的 `build.fileAssociations`）；
 - `node verify-converter.js`：转换层自检（判定规则单测 + 可选真实样本对账与转换冒烟，见第 20 节）；
 - `node verify-renderer.js`：渲染层无界面自检。用 Node `vm` + 一套 DOM/Electron 桩**真实执行

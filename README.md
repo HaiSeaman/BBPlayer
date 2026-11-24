@@ -6,7 +6,7 @@
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-1.9.2-ff3b4e?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.10.0-ff3b4e?style=for-the-badge)
 
 **A pure, lightweight, high-polish borderless media player for Windows**
 
@@ -64,6 +64,12 @@ When an audio file is loaded, the player transforms into a music screen:
 ### 🎨 Appearance
 - **Light / dark themes** with one click; semantic CSS variables keep text and controls readable in both; theme choice is remembered.
 - File associations for 25 media formats (11 of them auto-converted by the built-in converter), single-instance lock, window size/position memory (including maximized state).
+- **Narrow-window aware**: as the window narrows, the bottom dock tightens its spacing and button sizes; when one row no longer fits it becomes two centered rows, so every control stays inside the panel instead of being clipped or misplaced.
+
+### 🔄 Auto-update
+- **Silent version check on startup** (about 3 seconds in, in the background); when there is **no update you are not disturbed at all**, and network errors time out silently too.
+- **Only a real update opens a dialog**, where you choose "Update" or "Cancel". Confirming downloads the installer automatically and launches it, with progress shown on the taskbar icon.
+- The installer build hands off to the Setup package; the portable build saves the new version next to the app and relaunches it (the old file can be deleted manually).
 
 ---
 
@@ -143,6 +149,7 @@ BBPlayer/
 ├── preload.js              # Context-isolated bridge (contextBridge → window.electronAPI)
 ├── renderer.js             # All UI logic: playback state machine, subtitles, gestures, spectrum, themes
 ├── converter.js            # Media compatibility layer: probe + three tiers + cache + concurrency queue
+├── updater.js              # Startup update check: GitHub Release compare + download + launch installer
 ├── index.html              # Single-file view: DOM + all CSS (semantic variables, dual themes, rainbow tokens)
 ├── shared-video-exts.js    # Single source of truth: video/audio extension lists
 ├── shared-subtitle-exts.js # Single source of truth: subtitle extension list
@@ -156,7 +163,7 @@ BBPlayer/
 
 **Design principles**
 - **Zero runtime dependencies** — only `electron` and `electron-builder` as devDependencies.
-- **Single-file renderer** — one `renderer.js` (~2,400 lines) per window, fully isolated state.
+- **Single-file renderer** — one `renderer.js` (~2,760 lines) per window, fully isolated state.
 - **Hardened IPC** — every handler validates the sender against a trusted-window set (`isTrustedSender`); navigation, `window.open`, and non-top-level frames are blocked.
 - **Extension single source** — media/subtitle extension lists live in shared modules consumed by both processes via IPC, auto-checked by `npm run verify`.
 

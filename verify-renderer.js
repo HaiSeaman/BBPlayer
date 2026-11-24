@@ -276,13 +276,10 @@ function buildEnv(opts = {}) {
   // IPC 记录器：测试据此断言 renderer 究竟请求了什么
   const ipcCalls = [];
   const ipcHandlers = {
-    // 与 shared-video-exts.js / shared-subtitle-exts.js 保持一致
+    // 扩展名桩直接用共享模块（单一事实来源）：避免测试里再手抄一份、源清单改了测试还绿
     getVideoExtensions: () => Promise.resolve(opts.extensions || {
-      video: ['mp4', 'mkv', 'mov', 'webm', 'm4v', '3gp', 'ogv', 'f4v'],
-      convertibleVideo: ['avi', 'flv', 'wmv', 'ts', 'rmvb', 'rm', 'mpg', 'mpeg', 'm2ts', 'vob', 'm2v'],
-      audio: ['mp3', 'flac', 'wav', 'ogg', 'm4a', 'aac'],
-      all: ['mp4', 'mkv', 'mov', 'webm', 'm4v', '3gp', 'ogv', 'f4v', 'avi', 'flv', 'wmv', 'ts', 'rmvb', 'rm', 'mpg', 'mpeg', 'm2ts', 'vob', 'm2v', 'mp3', 'flac', 'wav', 'ogg', 'm4a', 'aac'],
-      subtitle: ['srt', 'vtt', 'ass', 'ssa']
+      ...require('./shared-video-exts.js'),
+      subtitle: require('./shared-subtitle-exts.js')
     }),
     prepareMedia: (p, f) => { ipcCalls.push(['prepareMedia', p, f]); return Promise.resolve(opts.prepareMedia ? opts.prepareMedia(p, f) : 'file:///D:/v/a.mp4'); },
     probeMedia: (p) => { ipcCalls.push(['probeMedia', p]); return Promise.resolve(opts.probeMedia ? opts.probeMedia(p) : null); },
@@ -739,7 +736,9 @@ async function playlistTest() {
 console.log('\n=== 运行时兜底 ===');
 
 async function fallbackTest() {
-  ok('tryConvertFallback：同一个文件只兜底一次（避免转完还是不行→来回折腾）', async () => {
+  // 注意：这两个用例的 fn 是 async，必须走 okAsync（旧的 ok() 不 await，断言失败会被吞成
+  // unhandled rejection，测试照样显示"通过"）
+  await okAsync('tryConvertFallback：同一个文件只兜底一次（避免转完还是不行→来回折腾）', async () => {
     const env = loadRenderer();
     await new Promise(r => setTimeout(r, 10));
     vm.runInContext(`
@@ -757,7 +756,7 @@ async function fallbackTest() {
     assert.strictEqual(afterSecond, 1, '第二次必须被拦下（每文件只兜一次）');
   });
 
-  ok('tryConvertFallback：清空播放器后慢兜底结果回来，不得把已清空的播放器重新绑上旧文件', async () => {
+  await okAsync('tryConvertFallback：清空播放器后慢兜底结果回来，不得把已清空的播放器重新绑上旧文件', async () => {
     let release;
     const gate = new Promise(r => { release = r; });
     const env = loadRenderer({
@@ -780,6 +779,78 @@ async function fallbackTest() {
   });
 
   return null;
+}
+
+// 兜底换源后必须恢复播放：实测 Chromium 改 src + load() 不会触发 pause 事件，
+// 代码若只换源不 play()，转换完成后画面会停在第一帧、图标却还显示"播放中"。
+async function fallbackResumePlaybackTest() {
+  const env = loadRenderer();
+  await new Promise(r => setTimeout(r, 10));
+  vm.runInContext(`
+    currentFilePath = 'D:\\\\v\\\\a.avi';
+    hasRealPath = true;
+    isVideoLoaded = true;
+    convertFallbackTried.clear();
+  `, env.context);
+  let plays = 0;
+  const origPlay = env.videoEl.play;
+  env.videoEl.play = () => { plays++; return origPlay(); };
+  env.videoEl._state.paused = false; // 换源前正在播放
+  await callFn(env, 'tryConvertFallback')('transcode');
+  assert.strictEqual(plays, 1, '播放中换源后必须重新播放（否则转码完成画面停住）');
+  assert.strictEqual(env.videoEl.paused, false, '换源后应处于播放态');
+
+  // 本来就是暂停态时，不得擅自开始播放
+  const env2 = loadRenderer();
+  await new Promise(r => setTimeout(r, 10));
+  vm.runInContext(`
+    currentFilePath = 'D:\\\\v\\\\b.avi';
+    hasRealPath = true;
+    isVideoLoaded = true;
+    convertFallbackTried.clear();
+  `, env2.context);
+  let plays2 = 0;
+  const origPlay2 = env2.videoEl.play;
+  env2.videoEl.play = () => { plays2++; return origPlay2(); };
+  env2.videoEl._state.paused = true;
+  await callFn(env2, 'tryConvertFallback')('transcode');
+  assert.strictEqual(plays2, 0, '暂停时换源不得自动播放');
+}
+
+// 双击/选择文件打开必须立即播放；同时"空列表自动播放"与"显式切播"不能叠加成两次加载
+// （重复加载 = 白跑两遍 prepareMedia，转码文件要等两遍）。
+async function openFileSingleLoadTest() {
+  // 场景一：空列表冷启动双击文件
+  const env = loadRenderer();
+  await new Promise(r => setTimeout(r, 10));
+  vm.runInContext('playlist = []; isVideoLoaded = false;', env.context);
+  env.subscribers.openFile('D:\\v\\cold.mp4');
+  await new Promise(r => setTimeout(r, 20));
+  const p1 = env.ipcCalls.filter(c => c[0] === 'prepareMedia').length;
+  assert.strictEqual(p1, 1, `空列表双击文件应只加载一次（实际 prepareMedia ${p1} 次）`);
+
+  // 场景二：已有片在播时双击新文件 → 必须切过去播（旧实现只会静默入列）
+  const env2 = loadRenderer();
+  await new Promise(r => setTimeout(r, 10));
+  vm.runInContext('playlist = []; isVideoLoaded = true;', env2.context);
+  env2.subscribers.openFile('D:\\v\\second.mp4');
+  await new Promise(r => setTimeout(r, 20));
+  const p2 = env2.ipcCalls.filter(c => c[0] === 'prepareMedia').length;
+  assert.strictEqual(p2, 1, `已有片在播时双击新文件应切播且只加载一次（实际 ${p2} 次）`);
+  assert.strictEqual(readVar(env2, 'currentPlaylistIndex'), 0, '双击新文件后应切到该文件播放');
+}
+
+// 清空播放器后必须判定为"无媒体"：Chromium 会把空 src 解析成文档地址（实测拿回 index.html），
+// 旧实现用 !!video.src 判断，导致空窗口里标题栏也会自动隐藏。
+function emptyStateHasNoMediaTest() {
+  const env = loadRenderer();
+  vm.runInContext(`currentFilePath = 'D:\\\\v\\\\a.mp4'; isVideoLoaded = true;`, env.context);
+  assert.strictEqual(callFn(env, 'hasMediaLoaded')(), true, '有片时应判定为已加载媒体');
+  callFn(env, 'resetPlayerToEmpty')();
+  // 复刻浏览器行为：src 属性读回来是文档地址，仍然非空
+  vm.runInContext(`video.src = 'file:///D:/index.html';`, env.context);
+  assert.strictEqual(callFn(env, 'hasMediaLoaded')(), false,
+    '清空后即使 video.src 非空也必须判定为无媒体（空状态标题栏要常驻）');
 }
 
 // ============ 第二组之二：字幕解析（真实世界的畸形写法） ============
@@ -1146,7 +1217,7 @@ async function loadListenerLeakTest() {
   const after = count('loadedmetadata') + count('error');
   const leaked = after - before - 2;   // 最后一次加载自己的 1 对（loadedmetadata+error）是合法在挂
   console.log('        [诊断] 加载前监听器: ' + before + '，20 次完整注册+打断后: ' + after + '（净泄漏 ' + leaked + ' 个，允许 0）');
-  assert.ok(leaked <= 0,
+  assert.strictEqual(leaked, 0,
     `20 次被中断的加载后监听器应零残留（最后 1 对属当前加载，实际净泄漏 ${leaked} 个）`);
 }
 
@@ -1262,6 +1333,9 @@ async function playlistIncrementalRenderTest() {
   controlsAutoHideTest();
   await playlistViewSwitchTest();
   await fallbackTest();
+  await okAsync('兜底换源后保持原来的播放/暂停状态（播放中换源不得停住）', fallbackResumePlaybackTest);
+  ok('清空播放器后不视为已加载媒体（空状态标题栏常驻）', emptyStateHasNoMediaTest);
+  await okAsync('双击打开文件：立即切播且只加载一次（不重复转码）', openFileSingleLoadTest);
   await okAsync('拖入字幕解码期间换片：旧字幕不得挂上新视频、不得污染手动优先标记', dragSubtitleRaceTest);
   await okAsync('scheduleAudioCheck：同路径重新加载（loadSequence 已变）后不得再触发探测', audioCheckSequenceTest);
   await okAsync('快速连切视频：被打断的加载不得残留 loadedmetadata/error 监听器', loadListenerLeakTest);

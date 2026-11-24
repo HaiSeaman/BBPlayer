@@ -1,6 +1,6 @@
 {
   "name": "bb-player",
-  "version": "1.9.2",
+  "version": "1.10.0",
   "description": "BBPlayer",
   "main": "main.js",
   "author": "",
@@ -36,6 +36,7 @@
       "preload.js",
       "renderer.js",
       "converter.js",
+      "updater.js",
       "index.html",
       "shared-video-exts.js",
       "shared-subtitle-exts.js",

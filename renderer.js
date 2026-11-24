@@ -15,12 +15,13 @@ window.electronAPI.getVideoExtensions().then(list => {
 
 // === 监听外部/命令行双击打开的文件（冷启动与运行中打开均经此事件下发） ===
 window.electronAPI.onOpenFile((filePath) => {
-  if (filePath) {
-    // 该文件已在列表中时，addFilesToPlaylist 会因去重而不新增任何条目（返回 0）。
-    // 此时必须显式切到那一条，否则"双击已打开过的视频"毫无反应，用户会以为软件卡死——
-    // 而这恰好是文件关联双击的主路径。
-    if (addFilesToPlaylist([filePath]) === 0) playExistingFile(filePath);
-  }
+  if (!filePath) return;
+  // 双击文件是明确的"打开这个"意图：无论它是新文件还是已在列表里，都要切过去播放。
+  // （旧写法只在"去重命中"时才播；已有别的片在播时双击新文件只会静默入列，用户会以为卡死）
+  // 注意空列表时 addFilesToPlaylist 已经会自动播放第一条，这里不能再重复切一次（否则会白跑两遍转码）
+  const wasLoaded = isVideoLoaded;
+  const added = addFilesToPlaylist([filePath]);
+  if (wasLoaded || added === 0) playExistingFile(filePath);
 });
 
 // === 格式转换进度与失败提示（内置 ffmpeg 三档处理的对外反馈）===
@@ -867,8 +868,11 @@ if (openFileBtn) {
     e.stopPropagation();
     window.electronAPI.openFileDialog().then(files => {
       if (files && files.length > 0) {
-        // 用户明确"选择文件打开"：若选中的都已在列表中（返回 0），直接切过去播放（与双击行为一致）
-        if (addFilesToPlaylist(files) === 0) playExistingFile(files[0]);
+        // "选择文件打开"同样是明确打开意图：新文件也要立即切播，不能只入列。
+        // 空列表时 addFilesToPlaylist 已自动播放第一条，避免重复切播（会白跑两遍转码）
+        const wasLoaded = isVideoLoaded;
+        const added = addFilesToPlaylist(files);
+        if (wasLoaded || added === 0) playExistingFile(files[0]);
       }
     }).catch(err => {
       console.error('打开文件对话框失败:', err);
@@ -897,19 +901,14 @@ async function openFolderAndAdd() {
   }
 }
 
-if (openFolderBtn) {
-  openFolderBtn.addEventListener('click', (e) => {
+// 两个入口按钮（空状态"打开文件夹" + 播放列表"添加文件夹"）行为完全一致，共用同一个处理器
+[openFolderBtn, addFolderBtn].forEach((btn) => {
+  if (!btn) return;
+  btn.addEventListener('click', (e) => {
     e.stopPropagation();
     openFolderAndAdd();
   });
-}
-
-if (addFolderBtn) {
-  addFolderBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    openFolderAndAdd();
-  });
-}
+});
 
 // 判断是否具有可被新窗口打开的本地绝对路径（Windows 盘符或 UNC 网络路径）。
 // 拖拽且无物理路径的临时文件（blob 播放）无法在另一窗口打开，需提示用户
@@ -1066,8 +1065,9 @@ function addFilesToPlaylist(fileList) {
     const startIndex = playlist.length;
     playlist = playlist.concat(newItems);
     renderPlaylist();
-    // 如果当前没有播放视频，自动播放加入的第一条
-    if (!isVideoLoaded || (video.paused && !video.src)) {
+    // 当前没有在播的片时才自动播放加入的第一条（拖拽/文件夹批量添加不打断正在看的片）。
+    // 旧条件里的 `video.paused && !video.src` 是死分支：清空播放器后 src 会被解析成文档地址，永不为空。
+    if (!isVideoLoaded) {
       playPlaylistItem(startIndex);
     } else {
       showToast(`已向列表添加 ${newItems.length} 个视频`);
@@ -1680,8 +1680,12 @@ async function tryConvertFallback(tier) {
       pendingRestoreTime = 0;
       return;
     }
+    // 换源会让元素回到暂停态（实测：改 src + load() 不会触发 pause 事件），
+    // 所以必须自己记住原状态并在换源后恢复播放，否则转换完成画面却停住、图标还停在"播放中"
+    const wasPlaying = !video.paused;
     video.src = url;               // 只换播放源：标题/历史/续播/字幕仍认原始文件路径
     video.load();
+    if (wasPlaying) video.play().catch(() => updatePlayPauseUI(false));
   } catch (err) {
     if (myFile === currentFilePath) {
       lastConvertError = { path: myFile, message: (err && err.message) || '转换失败' };
@@ -1795,6 +1799,8 @@ video.addEventListener('playing', () => scheduleAudioCheck());
 
 // 频谱动画跟随播放状态：播放即动、暂停即停（省电，不空转）
 video.addEventListener('play', () => {
+  // 图标跟随元素真实状态：避免换源/系统媒体键等路径下图标与画面不同步
+  updatePlayPauseUI(true);
   // 手动重播（播完 1 秒窗口内点播放/按空格/单击画面）时作废挂起的自动切集，
   // 防止用户刚手动重播就被定时器强切下一集；自动切集自身的 play 也走这里，属幂等清理
   clearAutoNextTimer();
@@ -1806,6 +1812,7 @@ video.addEventListener('play', () => {
   hideControlsIfUnused();
 });
 video.addEventListener('pause', () => {
+  updatePlayPauseUI(false);
   if (musicAnimFrame) { cancelAnimationFrame(musicAnimFrame); musicAnimFrame = null; }
 });
 
@@ -1873,6 +1880,7 @@ if (progressContainer) {
   };
 
   progressContainer.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return; // 只响应左键：右键点进度条不该跳转
     isSeeking = true;
     handleSeek(e);
 
@@ -2582,7 +2590,9 @@ function isPointerOverTitleBar(e) {
 
 // 已加载媒体（播放或暂停）才启用"移开即隐"；空状态（无媒体）标题栏常驻
 function hasMediaLoaded() {
-  return !!(video && video.src);
+  // 不能用 video.src 判定：清空播放器时 src='' 会被 URL 解析成文档地址（实测为 index.html），
+  // 结果"空状态"被误判成"已加载媒体"，标题栏在空窗口里也会自动隐藏。
+  return isVideoLoaded;
 }
 
 // 沉浸模式：媒体播放中才启用 3 秒闲置兜底（空状态/暂停时不兜底，移开即隐已覆盖）

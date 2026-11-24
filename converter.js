@@ -676,6 +676,9 @@ async function cleanup(force) {
     files.sort((a, b) => a.used - b.used);
     for (const f of files) {
       if (total <= config.maxCacheBytes) break;
+      // 刚被使用过的产物（正在播的片）不许淘汰：删掉后拖进度条会直接失败。
+      // 已按使用时间升序排好，遇到第一个"还新鲜"的就可以整体停止（后面的只会更新）。
+      if (now - f.used < 10 * 60 * 1000) break;
       await fsp.unlink(f.p).catch(() => {});
       lastUsedAt.delete(f.p);
       total -= f.size;
@@ -699,7 +702,7 @@ function killActive() {
 module.exports = {
   configure, ffmpegPath, isAvailable, probeFile, probeFileSync,
   parseProbe, decideTier, cacheFileName, parseProgress, progressPercent,
-  prepare, invalidate, killActive, cleanup, availableEncoders, looksLikeEncoderFailure, openh264Bitrate,
+  prepare, invalidate, killActive, cleanup, looksLikeEncoderFailure, openh264Bitrate,
   looksLikeInputError, estimateOutputBytes,
   NATIVE_EXTS,
   // 读取当前生效配置（测试要断言产物体积上限这类配置真被读进去了）
