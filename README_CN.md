@@ -6,7 +6,7 @@
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-1.10.0-ff3b4e?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.10.1-ff3b4e?style=for-the-badge)
 
 **纯粹、轻量、高颜值的 Windows 无边框本地多媒体播放器**
 
@@ -135,7 +135,7 @@ npm start
 
 ```bash
 npm install        # 安装开发依赖（仅 electron + electron-builder）
-npm run verify     # 一致性对账：共享扩展名列表 ↔ package.json 文件关联配置
+npm run verify     # 运行四套无界面自检（扩展名 25 项 / 转换层 36 项 / 渲染层 51 项 / 接线安全）
 npm run build      # 产出安装版 + 便携版到 release-dist/
 ```
 
@@ -167,7 +167,8 @@ BBPlayer/
 
 **设计原则**
 - **运行时零依赖**——仅 `electron` 与 `electron-builder` 两个 devDependencies。
-- **单文件渲染层**——每个窗口一份 `renderer.js`（约 2760 行），状态完全隔离。
+- **单文件渲染层**——每个窗口一份 `renderer.js`（约 2800 行），状态完全隔离。
+- **低占用与异步纪律**——零回流动画（`translateX` / `scaleY`）、长列表 `content-visibility`、暂停 8 秒自动挂起 `AudioContext`、老格式二次打开免探测直出缓存，以及主进程全面异步文件 I/O。
 - **加固的 IPC**——所有处理器经受信窗口集合校验发送方（`isTrustedSender`）；页面导航、`window.open` 与非顶层 frame 一律封死。
 - **扩展名单一来源**——媒体/字幕扩展名列表收敛于共享模块，两进程经 IPC 共享，由 `npm run verify` 自动对账。
 

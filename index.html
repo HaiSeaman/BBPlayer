@@ -59,6 +59,15 @@
       --tooltip-text: #ffffff;
       --subtitle-bg: rgba(8, 9, 12, 0.82);
       --subtitle-text: #ffffff;
+      --subtitle-box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+      --logo-inset-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15);
+      --shadow-popover: 0 12px 32px rgba(0, 0, 0, 0.5);
+      --shadow-tooltip: 0 6px 16px rgba(0, 0, 0, 0.5);
+      --danger-text: #ff4d4f;
+      --spectrum-top: rgba(0, 242, 254, 0.92);
+      --spectrum-mid: rgba(79, 172, 254, 0.9);
+      --spectrum-bot: rgba(79, 172, 254, 0.18);
+      --spectrum-glow: rgba(0, 242, 254, 0.35);
       --item-hover: rgba(255, 255, 255, 0.05);
       /* 窗口按键悬停底色：深色调块（深浅两主题下都比背景醒目），图标默认用主文字色 */
       --win-hover: rgba(30, 41, 59, 0.85);
@@ -104,6 +113,15 @@
       --tooltip-text: #101828;
       --subtitle-bg: rgba(255, 255, 255, 0.88);
       --subtitle-text: #101828;
+      --subtitle-box-shadow: 0 8px 24px rgba(30, 60, 100, 0.18), inset 0 0 0 1px rgba(20, 45, 80, 0.12);
+      --logo-inset-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+      --shadow-popover: 0 12px 28px rgba(30, 60, 100, 0.18);
+      --shadow-tooltip: 0 6px 16px rgba(30, 60, 100, 0.16);
+      --danger-text: #dc2626;
+      --spectrum-top: rgba(2, 132, 199, 0.92);
+      --spectrum-mid: rgba(59, 130, 246, 0.88);
+      --spectrum-bot: rgba(59, 130, 246, 0.18);
+      --spectrum-glow: rgba(2, 132, 199, 0.28);
       --item-hover: rgba(20, 45, 80, 0.06);
       --win-hover: rgba(20, 45, 80, 0.14);
       --shadow-drawer: -10px 0 24px rgba(30, 60, 100, 0.16);
@@ -316,7 +334,11 @@
       text-shadow: var(--subtitle-shadow);
       word-wrap: break-word;
       white-space: pre-line;
-      box-shadow: 0 8px 24px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(255,255,255,0.1);
+      box-shadow: var(--subtitle-box-shadow);
+    }
+
+    #custom-subtitle-text.hidden {
+      display: none;
     }
 
     /* 空状态 - 黑曜石晶质感视觉 */
@@ -354,7 +376,7 @@
       background: var(--logo-bg);
       border: 1px solid var(--panel-border);
       border-radius: 26px;
-      box-shadow: var(--logo-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.15);
+      box-shadow: var(--logo-shadow), var(--logo-inset-shadow);
       transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.3s ease;
     }
 
@@ -559,20 +581,29 @@
       backdrop-filter: none;
     }
 
-    /* 精准极细悬浮进度条 */
+    /* 精准极细悬浮进度条（透明容器提供 12px 易点击热区，内部轨道用 scaleY 合成放大零回流） */
     #progress-container {
       position: relative;
       width: 100%;
+      height: 12px;
+      cursor: pointer;
+    }
+
+    #progress-container::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 50%;
       height: 4px;
       background: var(--track-bg);
       border-radius: 2px;
-      cursor: pointer;
-      transition: height 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      transform: translateY(-50%);
+      transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
     }
 
-    #progress-container:hover {
-      height: 8px;
-      border-radius: 4px;
+    #progress-container:hover::before {
+      transform: translateY(-50%) scaleY(1.8);
     }
 
     /* 彩虹进度条：填充层恒为全宽彩虹渐变，用 --progress 变量经 clip-path 裁剪。
@@ -580,13 +611,18 @@
     #progress-fill {
       position: absolute;
       left: 0;
-      top: 0;
-      height: 100%;
+      top: 50%;
+      height: 4px;
       width: 100%;
       background: var(--rainbow-gradient);
       clip-path: inset(0 calc(100% - var(--progress, 0%)) 0 0 round 4px);
       border-radius: 4px;
-      transition: clip-path 0.05s linear;
+      transform: translateY(-50%);
+      transition: clip-path 0.05s linear, transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    #progress-container:hover #progress-fill {
+      transform: translateY(-50%) scaleY(1.8);
     }
 
     #progress-handle {
@@ -622,7 +658,7 @@
       pointer-events: none;
       white-space: nowrap;
       border: 1px solid var(--panel-border);
-      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.5);
+      box-shadow: var(--shadow-tooltip);
     }
 
     /* 播放功能栏按钮组。
@@ -794,7 +830,7 @@
       flex-direction: column;
       gap: 2px;
       z-index: 30;
-      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+      box-shadow: var(--shadow-popover);
       min-width: 110px;
       opacity: 0;
       pointer-events: none;
@@ -885,11 +921,11 @@
     }
     .resume-close:hover { opacity: 1; }
 
-    /* 右侧抽屉式播放列表面板 */
+    /* 右侧抽屉式播放列表面板（用 transform 合成平移替代 right 动画，避免抽屉开关每帧重排） */
     #playlist-panel {
       position: absolute;
       top: 42px;
-      right: -320px;
+      right: 0;
       width: 320px;
       height: calc(100vh - 42px);
       background: var(--surface-raised);
@@ -897,13 +933,14 @@
       z-index: 18;
       display: flex;
       flex-direction: column;
-      transition: right 0.35s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s ease;
+      transform: translateX(100%);
+      transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s ease;
       /* 关闭时投影设为全透明：面板只是平移到窗口外，投影仍会渗进窗口右边框形成黑边 */
       box-shadow: -10px 0 30px rgba(0, 0, 0, 0);
     }
 
     #playlist-panel.open {
-      right: 0;
+      transform: translateX(0);
       box-shadow: var(--shadow-drawer);
     }
 
@@ -968,6 +1005,8 @@
       transition: color 0.15s ease, background-color 0.15s ease;
       white-space: nowrap;
       overflow: hidden;
+      content-visibility: auto;
+      contain-intrinsic-size: 36px;
     }
 
     .playlist-item:hover {
@@ -1090,7 +1129,7 @@
     }
 
     .playlist-item .remove-btn:hover {
-      color: #ff4d4f;
+      color: var(--danger-text);
     }
 
     .playlist-item .new-win-btn:hover {
@@ -1266,7 +1305,7 @@
 
     <!-- 自定义外挂字幕渲染区 -->
     <div id="custom-subtitle-overlay">
-      <span id="custom-subtitle-text" style="display: none;"></span>
+      <span id="custom-subtitle-text" class="hidden"></span>
     </div>
 
     <!-- 空状态 - 黑曜透镜晶体视觉 -->
@@ -1282,7 +1321,7 @@
               <stop offset="100%" class="rw-7"/>
             </linearGradient>
           </defs>
-          <path class="logo-blob" d="M180 140 C180 140, 290 140, 340 190 C380 230, 360 280, 310 300 C370 320, 380 380, 320 420 C270 450, 180 450, 180 450 Z" fill="rgba(255, 255, 255, 0.05)" stroke="rgba(255, 255, 255, 0.2)" stroke-width="6"/>
+          <path class="logo-blob" d="M180 140 C180 140, 290 140, 340 190 C380 230, 360 280, 310 300 C370 320, 380 380, 320 420 C270 450, 180 450, 180 450 Z" stroke-width="6"/>
           <path d="M210 170 L340 256 L210 342 Z" fill="url(#emptyNeon)"/>
         </svg>
       </div>

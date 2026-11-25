@@ -180,18 +180,24 @@ let musicCoverToken = 0;        // 封面异步加载令牌：换歌后旧封面
 let spectrumCtx = null;         // 频谱画布 2D 上下文缓存（getContext 每帧重复调用纯属浪费）
 let spectrumBins = null;        // 频谱采样缓冲复用（每帧 new 一个 Uint8Array 纯属给 GC 添堵）
 
+// 提取文件路径小写扩展名（确保点号出现在最后一个路径分隔符之后）
+function mediaExtOf(p) {
+  if (!p || typeof p !== 'string') return '';
+  const dot = p.lastIndexOf('.');
+  const sep = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+  return dot > sep ? p.substring(dot + 1).toLowerCase() : '';
+}
+
 // 判断是否为音频扩展名（用于跳字幕查找等同步分支）
 function isAudioExt(p) {
-  if (!p || typeof p !== 'string') return false;
-  const dot = p.lastIndexOf('.');
-  if (dot < 0) return false;
-  return mediaExtensions.audio.includes(p.substring(dot + 1).toLowerCase());
+  return mediaExtensions.audio.includes(mediaExtOf(p));
 }
 
 // === 音量增益管线（Web Audio：音量可放大到 0%~200%，带防破音保护） ===
 // 原理：在 <video> 与扬声器之间加装“数字功放”。video.volume 被系统限制在 0~1（0%~100%），
 // 但 GainNode 放大倍率无上限，可把音频信号物理放大到 200% 甚至更高。
 let audioCtx = null;
+let audioCtxIdleTimer = null;
 let gainNode = null;
 let audioPipelineReady = false; // 增益管线是否可用（初始化失败则回退原生音量 0~100%）
 let masterVolume = 1.0;         // 用户音量 0.0 ~ 2.0：0~1 原生区，1~2 增益放大区
@@ -250,7 +256,7 @@ function initAudioPipeline() {
 // === 纯音频音乐播放效果：频谱动画 + 封面 + 歌名 ===
 // 频谱数据来源：initAudioPipeline 创建的 analyserNode（只读分流，不影响音量/防破音链路）。
 
-// 按当前窗口尺寸重新铺设频谱画布（含高分屏清晰度补偿）
+// 按当前窗口尺寸重新铺设频谱画布（含高分屏清晰度补偿，尺寸未变化时跳过重建）
 function setupSpectrumCanvas() {
   if (!musicSpectrumCanvas || !musicVisualizer) return;
   const rect = musicVisualizer.getBoundingClientRect();
@@ -258,9 +264,11 @@ function setupSpectrumCanvas() {
   const dpr = window.devicePixelRatio || 1;
   const w = Math.min(rect.width * 0.64, 720);
   const h = 64;
-  // 显示尺寸交给 CSS（width: min(64%, 720px); height: 64px），JS 只负责绘制缓冲的 dpr 补偿
-  musicSpectrumCanvas.width = Math.round(w * dpr);
-  musicSpectrumCanvas.height = Math.round(h * dpr);
+  const nextW = Math.round(w * dpr);
+  const nextH = Math.round(h * dpr);
+  // 显示尺寸交给 CSS（width: min(64%, 720px); height: 64px），JS 只在绘制缓冲尺寸变化时重设
+  if (musicSpectrumCanvas.width !== nextW) musicSpectrumCanvas.width = nextW;
+  if (musicSpectrumCanvas.height !== nextH) musicSpectrumCanvas.height = nextH;
 }
 
 // 绘制一帧频谱柱状图（32 根细渐变圆角柱，青→紫，顶部亮、底部融入背景）
@@ -318,15 +326,22 @@ function drawSpectrumFrame() {
   musicAnimFrame = requestAnimationFrame(drawSpectrumFrame);
 }
 
+let coverGlowCanvas = null;
+let coverGlowCtx = null;
+
 // 从封面图采样主色，把背景渐变与环境光晕染成歌的主色调（Ambient 风格）。
 // file:// 页面下 canvas 读本地图一般允许；万一被污染/受限，catch 后保留默认深色背景，绝不崩。
 function applyCoverGlow(imgEl) {
   if (!musicVisualizer || !imgEl) return;
   try {
-    const probe = document.createElement('canvas');
-    probe.width = probe.height = 24;
-    const ctx = probe.getContext('2d', { willReadFrequently: true });
+    if (!coverGlowCanvas) {
+      coverGlowCanvas = document.createElement('canvas');
+      coverGlowCanvas.width = coverGlowCanvas.height = 24;
+      coverGlowCtx = coverGlowCanvas.getContext('2d', { willReadFrequently: true });
+    }
+    const ctx = coverGlowCtx;
     if (!ctx) return;
+    ctx.clearRect(0, 0, 24, 24);
     ctx.drawImage(imgEl, 0, 0, 24, 24);
     const d = ctx.getImageData(0, 0, 24, 24).data;
     let r = 0, g = 0, b = 0, n = 0;
@@ -359,8 +374,7 @@ async function enterMusicMode(filePath, displayName) {
 
   // 元信息行：格式 · 时长（loadedmetadata 后 duration 已可用）
   if (musicMetaEl) {
-    const ext = (typeof filePath === 'string' && filePath.includes('.'))
-      ? filePath.split('.').pop().toUpperCase() : '';
+    const ext = mediaExtOf(filePath).toUpperCase();
     const dur = (Number.isFinite(video.duration) && video.duration > 0) ? formatTime(video.duration) : '';
     musicMetaEl.textContent = [ext, dur].filter(Boolean).join(' · ');
   }
@@ -496,8 +510,10 @@ function saveHistoryEntry(pathKey, time) {
   try {
     const history = loadHistory();
     history[pathKey] = { t: Math.floor(time), ts: Date.now() };
-    const entries = Object.entries(history).sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0));
-    const trimmed = entries.length > HISTORY_MAX ? Object.fromEntries(entries.slice(0, HISTORY_MAX)) : history;
+    const keys = Object.keys(history);
+    const trimmed = keys.length > HISTORY_MAX
+      ? Object.fromEntries(Object.entries(history).sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0)).slice(0, HISTORY_MAX))
+      : history;
     localStorage.setItem(HISTORY_KEY, JSON.stringify(trimmed));
   } catch (e) {
     console.error('保存播放历史失败:', e);
@@ -505,7 +521,13 @@ function saveHistoryEntry(pathKey, time) {
 }
 
 // === 用户设置持久化（音量/倍速/字幕样式/播放模式） ===
+let persistSettingsTimer = null;
+
 function persistSettings() {
+  if (persistSettingsTimer) {
+    clearTimeout(persistSettingsTimer);
+    persistSettingsTimer = null;
+  }
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
       volume: masterVolume,
@@ -520,6 +542,15 @@ function persistSettings() {
     // 忽略写入失败
   }
 }
+
+// 高频滑块/滚轮调音用防抖写盘，关窗前兜底立刻落盘
+function schedulePersistSettings() {
+  if (persistSettingsTimer) clearTimeout(persistSettingsTimer);
+  persistSettingsTimer = setTimeout(persistSettings, 250);
+}
+window.addEventListener('beforeunload', () => {
+  if (persistSettingsTimer) persistSettings();
+});
 
 // === 外观切换图标（必须声明在 restoreSettings 之前）===
 // restoreSettings 在脚本求值阶段就同步执行并调用 applyAppearance()，而 applyAppearance 要读这两个常量。
@@ -540,8 +571,8 @@ const MOON_ICON = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
     // 倍速必须钳制在合法范围：localStorage 损坏存入 0/负数/超大值时，
     // playbackRate 赋值会抛异常并中断后续所有设置的恢复
     if (typeof s.speed === 'number' && isFinite(s.speed) && s.speed >= 0.25 && s.speed <= 4) currentSpeed = s.speed;
-    if (typeof s.subtitleOffset === 'number') subtitleOffset = Math.max(-60, Math.min(60, s.subtitleOffset));
-    if (typeof s.subtitleFontSize === 'number') currentSubtitleFontSize = Math.max(12, Math.min(48, s.subtitleFontSize));
+    if (typeof s.subtitleOffset === 'number' && isFinite(s.subtitleOffset)) subtitleOffset = Math.max(-60, Math.min(60, s.subtitleOffset));
+    if (typeof s.subtitleFontSize === 'number' && isFinite(s.subtitleFontSize)) currentSubtitleFontSize = Math.max(12, Math.min(48, s.subtitleFontSize));
     if (typeof s.subtitleVisible === 'boolean') isSubtitleVisible = s.subtitleVisible;
     if (s.playMode && ['list-loop', 'random', 'single-loop'].includes(s.playMode)) {
       playMode = s.playMode;
@@ -696,7 +727,7 @@ async function loadAndPlayVideo(filePathOrFile) {
   // 重置字幕状态（新视频不沿用上一部的字幕）
   currentSubtitleData = [];
   manualSubtitleFor = null; // 换片后清掉"手动字幕优先"标记，否则新片永远不会自动加载同名字幕
-  if (customSubtitle) customSubtitle.style.display = 'none';
+  if (customSubtitle) customSubtitle.classList.add('hidden');
   lastRenderedSubText = null; // 清空缓存文案，否则新片首句若与上一部末句同文会被判为"无需重绘"而漏显
 
   // 重置续播状态（新视频不沿用上一部的续播提示）
@@ -791,22 +822,23 @@ async function loadSubtitleFromPath(filePath, expectedVideoPath) {
   return false;
 }
 
-// 检查同名本地字幕（依次尝试 .srt / .vtt / .ass / .ssa，扩展名来自 IPC 下发的单一来源）
+// 检查同名本地字幕（并行探测 .srt / .vtt / .ass / .ssa，按顺序取第一个命中的）
 async function checkAndAutoLoadSubtitles(basePath) {
   // 用户手动给这个视频配过字幕（拖入或菜单选择）→ 同名字幕自动加载一律让位，
   // 否则用户精心调好的字幕会被同目录下那个同名的破字幕顶掉
   if (manualSubtitleFor && manualSubtitleFor === currentFilePath) return;
   const videoKey = currentFilePath; // 发起时的视频路径（令牌）
-  for (const ext of mediaExtensions.subtitle.map(e => '.' + e)) {
-    try {
-      const ok = await loadSubtitleFromPath(basePath + ext, videoKey);
-      if (ok) {
-        if (currentFilePath === videoKey) showToast('已自动载入同名外挂字幕');
-        return;
-      }
-    } catch (e) {
-      // 继续尝试下一个扩展名
-    }
+  const exts = mediaExtensions.subtitle;
+  if (!exts.length) return;
+  const texts = await Promise.all(
+    exts.map(ext => window.electronAPI.readTextFile(`${basePath}.${ext}`).catch(() => null))
+  );
+  if (currentFilePath !== videoKey) return;
+  if (manualSubtitleFor && manualSubtitleFor === currentFilePath) return;
+  const text = texts.find(Boolean);
+  if (text) {
+    parseAndApplySubtitle(text);
+    showToast('已自动载入同名外挂字幕');
   }
 }
 
@@ -1000,18 +1032,9 @@ window.addEventListener('drop', (e) => {
   if (files.length === 0) return;
 
   // 视频扩展名与主进程共享同一份列表（单一来源，经 IPC 下发）
-  const videoExtensions = mediaExtensions.all;
-  const videoFiles = files.filter(f => {
-    // 过滤掉非视频扩展名以及大小为0或类似文件夹的非法条目
-    if (!f.name || f.size === 0 || (f.type === '' && !f.name.includes('.'))) return false;
-    const ext = f.name.split('.').pop().toLowerCase();
-    return videoExtensions.includes(ext);
-  });
-
-  const subtitleFiles = files.filter(f => {
-    const ext = f.name.split('.').pop().toLowerCase();
-    return mediaExtensions.subtitle.includes(ext); // 白名单单一来源（IPC 下发），与主进程一致
-  });
+  const isValidDropFile = (f) => f && f.name && f.size > 0 && !(f.type === '' && !f.name.includes('.'));
+  const videoFiles = files.filter(f => isValidDropFile(f) && mediaExtensions.all.includes(mediaExtOf(f.name)));
+  const subtitleFiles = files.filter(f => isValidDropFile(f) && mediaExtensions.subtitle.includes(mediaExtOf(f.name)));
 
   // 处理拖入的视频（同时拖了视频+字幕时也照常加入列表）
   if (videoFiles.length > 0) {
@@ -1163,12 +1186,32 @@ function appendPlaylistItems(fromIndex) {
   playlistItemsContainer.appendChild(frag);
 }
 
-// 播放列表点击统一走事件委托（绑定一次，条目再多也只有单个监听器）
+// 播放列表 / 历史视图点击统一走事件委托（绑定一次，条目再多也只有单个监听器）
 if (playlistItemsContainer) {
   playlistItemsContainer.addEventListener('click', (e) => {
-    if (playlistView !== 'list') return; // 历史视图条目有自己的独立绑定
     const itemDiv = e.target.closest('.playlist-item');
-    if (!itemDiv || !itemDiv.dataset.index) return;
+    if (!itemDiv) return;
+    if (playlistView === 'history') {
+      const filePath = itemDiv.dataset.historyPath;
+      if (!filePath) return;
+      const removeBtnHit = e.target.closest('.remove-btn');
+      if (removeBtnHit && itemDiv.contains(removeBtnHit)) {
+        e.stopPropagation();
+        deleteHistoryEntry(filePath);
+        if (itemDiv.parentNode) itemDiv.parentNode.removeChild(itemDiv);
+        const remain = playlistItemsContainer.querySelectorAll('.playlist-item').length;
+        if (playlistCountEl) playlistCountEl.textContent = `${remain} 条历史`;
+        if (remain === 0) playlistItemsContainer.innerHTML = `<div class="playlist-empty">暂无观看历史</div>`;
+      } else {
+        togglePlaylistView();
+        if (!playlist.some(item => item.key === filePath)) {
+          playlist.push({ target: filePath, name: filePath.split(/[\\/]/).pop(), key: filePath });
+        }
+        playPlaylistItem(playlist.findIndex(item => item.key === filePath));
+      }
+      return;
+    }
+    if (playlistView !== 'list' || !itemDiv.dataset.index) return;
     const index = Number(itemDiv.dataset.index);
     if (!Number.isInteger(index) || index < 0 || index >= playlist.length) return;
     // 用 closest 命中按钮：点在按钮内部 SVG 图形上时 target 不带按钮 class，
@@ -1226,6 +1269,7 @@ function renderHistoryView() {
   entries.forEach(([filePath, data]) => {
     const div = document.createElement('div');
     div.className = 'playlist-item';
+    div.dataset.historyPath = filePath;
 
     const nameSpan = document.createElement('span');
     nameSpan.className = 'item-name';
@@ -1244,23 +1288,6 @@ function renderHistoryView() {
     div.appendChild(nameSpan);
     div.appendChild(timeSpan);
     div.appendChild(removeBtn);
-
-    removeBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      deleteHistoryEntry(filePath);
-      renderHistoryView();
-    });
-
-    div.addEventListener('click', () => {
-      // 加入列表（若不存在）并直接播放；自动切回列表视图以便看到高亮。
-      // 本监听器只存在于历史视图渲染的条目上（切回列表视图时容器被重写、监听器随之销毁），必然处于历史视图
-      togglePlaylistView();
-      if (!playlist.some(item => item.key === filePath)) {
-        playlist.push({ target: filePath, name: filePath.split(/[\\/]/).pop(), key: filePath });
-      }
-      // 上方 either 已存在或刚 push，findIndex 必命中（key 即 filePath），无 fallback 分支
-      playPlaylistItem(playlist.findIndex(item => item.key === filePath));
-    });
 
     frag.appendChild(div);
   });
@@ -1302,14 +1329,24 @@ function resetPlayerToEmpty() {
   pendingRestoreTime = 0;
   lastConvertError = null;
   revokeCurrentBlobUrl();
-  if (customSubtitle) customSubtitle.style.display = 'none';
+  if (customSubtitle) customSubtitle.classList.add('hidden');
   lastRenderedSubText = null; // 清空缓存文案：否则换片后首句若与上一部末句同文会被判为"无需重绘"而漏显
   hideResumeToast();
   video.src = '';
   video.load();
   exitMusicMode(); // 清空播放器时撤掉音乐效果层，避免残留
+  if (audioCtxIdleTimer) { clearTimeout(audioCtxIdleTimer); audioCtxIdleTimer = null; }
+  if (audioCtx && audioCtx.state === 'running' && typeof audioCtx.suspend === 'function') {
+    audioCtx.suspend().catch(() => {});
+  }
   if (emptyState) emptyState.style.display = 'flex';
   isVideoLoaded = false;
+  if (videoTitleEl) videoTitleEl.textContent = 'BBPlayer';
+  if (currentTimeEl) currentTimeEl.textContent = '00:00';
+  if (durationEl) durationEl.textContent = '00:00';
+  if (progressContainer) progressContainer.style.setProperty('--progress', '0%');
+  clearTitlebarIdleTimer();
+  if (titleBar) titleBar.classList.remove('hide');
   updatePlayPauseUI(false); // 复位播放/暂停图标（清空时可能正处于播放中）
 }
 
@@ -1373,7 +1410,9 @@ function removePlaylistItem(index) {
   if (currentPlaylistIndex === index) {
     if (playlist.length > 0) {
       const nextIndex = index < playlist.length ? index : playlist.length - 1;
+      // playPlaylistItem 发现 DOM 长度与 playlist 不一致会直接重建列表，避免重复 renderPlaylist()
       playPlaylistItem(nextIndex);
+      return;
     } else {
       resetPlayerToEmpty();
     }
@@ -1650,13 +1689,6 @@ let noPictureTimer = null;
 let audioCheckTimer = null;
 let pendingRestoreTime = 0;   // 兜底换源后要恢复的观看位置
 
-function mediaExtOf(p) {
-  if (!p) return '';
-  const dot = p.lastIndexOf('.');
-  const sep = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
-  return dot > sep ? p.substring(dot + 1).toLowerCase() : '';
-}
-
 async function tryConvertFallback(tier) {
   if (!currentFilePath || !hasRealPath || !isVideoLoaded) return;
   if (convertFallbackTried.has(currentFilePath)) return;
@@ -1805,6 +1837,7 @@ video.addEventListener('play', () => {
   // 防止用户刚手动重播就被定时器强切下一集；自动切集自身的 play 也走这里，属幂等清理
   clearAutoNextTimer();
   // AudioContext 挂起兜底：自动播放策略收紧/长时间挂起后，每次播放都尝试唤醒音频上下文，否则会无声且无提示
+  if (audioCtxIdleTimer) { clearTimeout(audioCtxIdleTimer); audioCtxIdleTimer = null; }
   if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
   if (isMusicMode && !musicAnimFrame) drawSpectrumFrame();
   // 播放刚开始就把"没在用的"控制栏收起来：其毛玻璃在视频播放期每帧都要重算，是 GPU 主要开销。
@@ -1814,6 +1847,13 @@ video.addEventListener('play', () => {
 video.addEventListener('pause', () => {
   updatePlayPauseUI(false);
   if (musicAnimFrame) { cancelAnimationFrame(musicAnimFrame); musicAnimFrame = null; }
+  if (audioCtx && audioCtx.state === 'running' && typeof audioCtx.suspend === 'function') {
+    if (audioCtxIdleTimer) clearTimeout(audioCtxIdleTimer);
+    audioCtxIdleTimer = setTimeout(() => {
+      audioCtxIdleTimer = null;
+      if (video.paused && audioCtx && audioCtx.state === 'running') audioCtx.suspend().catch(() => {});
+    }, 8000);
+  }
 });
 
 // 视频加载失败提示（损坏文件 / 不支持的格式）
@@ -1822,7 +1862,7 @@ video.addEventListener('error', () => {
   // 主动清空播放器(src='' + load())也会触发 error，此时不提示
   if (!isVideoLoaded) return;
   exitMusicMode(); // 文件加载失败：撤掉残留的音乐界面（若上一首是纯音频），等下一个文件 loadedmetadata 再重建
-  const ext = currentFilePath ? currentFilePath.split('.').pop().toLowerCase() : '';
+  const ext = mediaExtOf(currentFilePath);
   showToast(`播放失败：系统无法解码该文件 (${ext || '未知的编码类型'})`);
 
   // 若在播放列表中播放失败，延迟 1.5 秒自动跳到下一个"没失败过"的媒体；
@@ -1932,16 +1972,17 @@ function setVolumeIcon(vol) {
   }
 }
 
-function updateVolume(val) {
+function updateVolume(val, deferSave = false) {
   // 支持 0~2（0%~200%）：0~1 原生音量区，1~2 由增益放大器扩展；
   // 钳制统一由 applyMasterVolume 负责（它本身就是唯一的音量应用出口）
   masterVolume = parseFloat(val) || 0;
   applyMasterVolume();
-  persistSettings();
+  if (deferSave) schedulePersistSettings();
+  else persistSettings();
 }
 
 if (volumeSlider) {
-  volumeSlider.addEventListener('input', (e) => updateVolume(e.target.value));
+  volumeSlider.addEventListener('input', (e) => updateVolume(e.target.value, true));
 }
 
 if (volumeBtn) {
@@ -1963,9 +2004,9 @@ window.addEventListener('wheel', (e) => {
   if (!videoContainer || !videoContainer.contains(e.target)) return;
   e.preventDefault();
   if (e.deltaY < 0) {
-    updateVolume(masterVolume + 0.05);
+    updateVolume(masterVolume + 0.05, true);
   } else {
-    updateVolume(masterVolume - 0.05);
+    updateVolume(masterVolume - 0.05, true);
   }
 }, { passive: false });
 
@@ -2180,8 +2221,8 @@ let lastRenderedSubText = null;
 function renderSubtitlesAt(currentTime) {
   if (!customSubtitle) return;
   if (!currentSubtitleData || currentSubtitleData.length === 0 || !isSubtitleVisible) {
-    if (customSubtitle.style.display !== 'none') {
-      customSubtitle.style.display = 'none';
+    if (!customSubtitle.classList.contains('hidden')) {
+      customSubtitle.classList.add('hidden');
       lastRenderedSubText = null;
     }
     return;
@@ -2191,12 +2232,12 @@ function renderSubtitlesAt(currentTime) {
   if (activeSub) {
     if (lastRenderedSubText !== activeSub.text) {
       customSubtitle.textContent = activeSub.text;
-      customSubtitle.style.display = 'block';
+      customSubtitle.classList.remove('hidden');
       lastRenderedSubText = activeSub.text;
     }
   } else {
-    if (customSubtitle.style.display !== 'none') {
-      customSubtitle.style.display = 'none';
+    if (!customSubtitle.classList.contains('hidden')) {
+      customSubtitle.classList.add('hidden');
       lastRenderedSubText = null;
     }
   }

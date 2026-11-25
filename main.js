@@ -78,8 +78,13 @@ if (!gotTheLock) {
     // 运行中再次打开视频文件：多文件逐个开独立窗口播放（复用现有新窗口机制，天然处理加载时序）；
     // 无文件参数（如重复双击 exe）则唤起/显示主窗口（最小化时也恢复前置）。
     // 延迟到 ready 后再建窗：开机自启期双实例竞争时 app 可能尚未就绪，直接 new BrowserWindow 会抛异常崩溃。
-    app.whenReady().then(() => {
-      const filePaths = parseFilePathFromArgs(commandLine);
+    app.whenReady().then(async () => {
+      const candidates = Array.isArray(commandLine)
+        ? commandLine.slice(1).filter(arg => arg && !arg.startsWith('--'))
+        : [];
+      // 异步校验，避免运行中同步 existsSync 阻塞主进程
+      const resolved = await Promise.all(candidates.map(resolveMediaPath));
+      const filePaths = resolved.filter(Boolean);
       if (filePaths.length > 0) {
         // 同样受窗口上限约束：一次"打开方式"选中大量文件时，不能绕开 MAX_PLAYER_WINDOWS 开满窗口
         for (const p of filePaths) {
@@ -136,9 +141,9 @@ function loadWindowState() {
   return null;
 }
 
-// 记录"程序化自动贴合尺寸"的窗口：resize-window-to-video 的自动 setSize 引发的 resize 不写进
-// 窗口状态记忆（避免覆盖用户手动调整的偏好尺寸）。用户手势拉伸（will-resize）时移出该集合。
-const programmaticResizeWindows = new WeakSet();
+// 记录"程序化自动贴合尺寸"的目标宽高（win → {w, h}）：只消费匹配这一次，
+// 避免最大化/Win+方向键分屏等不触发 will-resize 的系统事件长期被误跳过不落盘。
+const programmaticResizeTargets = new WeakMap();
 
 // 记录"程序化挪窗"的目标坐标（win → {x, y}）：换片自动贴合时若窗口贴边会 setPosition 把它挪回屏内，
 // 这次挪动同样不该写进窗口状态记忆 —— 否则 writeWindowState 会把"程序化贴合出的尺寸+位置"整体落盘，
@@ -241,10 +246,10 @@ function createPlayerWindow(options = {}) {
 
   // 用户手动拖拽窗口边缘时解除视频宽高比锁定（程序化 setSize 不触发 will-resize，
   // 因此换片自动贴合不受影响）；下次加载新视频时会重新锁定。
-  // 同时标记：此 resize 来自用户手势，可写入窗口状态记忆（程序化 setSize 不可写）
+  // 同时清除程序化目标尺寸登记，确保用户手势缩放可写入窗口状态记忆
   win.on('will-resize', () => {
     if (win && !win.isDestroyed()) {
-      programmaticResizeWindows.delete(win);
+      programmaticResizeTargets.delete(win);
       win.setAspectRatio(0);
     }
   });
@@ -255,11 +260,16 @@ function createPlayerWindow(options = {}) {
     // 最大化时落盘 getNormalBounds()（恢复后的正常边界）而非工作区整块，
     // 并附带 maximized 标志供下次启动恢复，避免"伪最大化"占满屏幕。
     let stateSaveTimer = null;
-    const writeWindowState = () => {
+    const writeWindowState = (sync = false) => {
       if (!win || win.isDestroyed() || win.isFullScreen()) return;
       try {
         const bounds = win.isMaximized() ? win.getNormalBounds() : win.getBounds();
-        fs.writeFileSync(windowStateFile, JSON.stringify({ ...bounds, maximized: win.isMaximized() }), 'utf8');
+        const json = JSON.stringify({ ...bounds, maximized: win.isMaximized() });
+        if (sync) {
+          fs.writeFileSync(windowStateFile, json, 'utf8');
+        } else {
+          fs.promises.writeFile(windowStateFile, json, 'utf8').catch(() => {});
+        }
       } catch (e) {
         // 忽略写入失败
       }
@@ -267,31 +277,39 @@ function createPlayerWindow(options = {}) {
     const scheduleStateSave = () => {
       if (!win || win.isDestroyed() || win.isFullScreen()) return;
       if (stateSaveTimer) clearTimeout(stateSaveTimer);
-      stateSaveTimer = setTimeout(writeWindowState, 400);
+      stateSaveTimer = setTimeout(() => writeWindowState(false), 400);
     };
-    // resize 仅用户手势（will-resize 移出 programmaticResizeWindows）时落盘；
-    // 换片自动贴合尺寸（程序化 setSize）不写进记忆，避免覆盖用户偏好尺寸。
-    // move 同理：程序化挪窗（贴合时把窗口拉回屏内）也不写进记忆 —— 按登记的目标坐标核对，
-    // 匹配则跳过并消费该登记；不匹配说明是用户手动移动，照常保存。
-    win.on('resize', () => { if (!programmaticResizeWindows.has(win)) scheduleStateSave(); });
+    // resize 按程序化目标尺寸一次性消费核对（容忍 2px 高分屏舍入误差），其余尺寸变动（含手动、分屏）均落盘；
+    // maximize/unmaximize 也同步清掉残留目标并记录最大化标志。
+    win.on('maximize', () => { programmaticResizeTargets.delete(win); scheduleStateSave(); });
+    win.on('unmaximize', () => { programmaticResizeTargets.delete(win); scheduleStateSave(); });
+    win.on('resize', () => {
+      const target = programmaticResizeTargets.get(win);
+      if (target) {
+        programmaticResizeTargets.delete(win);
+        const [w, h] = win.getSize();
+        if (Math.abs(w - target.w) <= 2 && Math.abs(h - target.h) <= 2) return;
+      }
+      scheduleStateSave();
+    });
     win.on('move', () => {
       const target = programmaticMoveTargets.get(win);
       if (target) {
         programmaticMoveTargets.delete(win);   // 只消费一次，不长期残留
         const b = win.getBounds();
-        if (b.x === target.x && b.y === target.y) return; // 正是这次程序化挪动 → 不写记忆
+        if (Math.abs(b.x - target.x) <= 2 && Math.abs(b.y - target.y) <= 2) return; // 正是这次程序化挪动 → 不写记忆
       }
       scheduleStateSave();
     });
 
-    // 主窗口关闭时把窗口状态强制落盘（取消挂起的防抖保存，避免最后一次移动/缩放丢失）。
+    // 主窗口关闭时把窗口状态强制同步落盘（取消挂起的防抖保存，避免最后一次移动/缩放丢失）。
     // 退出软件由 window-all-closed 统一负责（可能还有别的播放器窗口开着）。
     win.on('close', () => {
       if (stateSaveTimer) {
         clearTimeout(stateSaveTimer);
         stateSaveTimer = null;
       }
-      writeWindowState();
+      writeWindowState(true);
     });
   }
 
@@ -326,6 +344,12 @@ app.whenReady().then(() => {
       console.warn('[BBPlayer] 未找到内置转换器，avi/flv/wmv/ts/rmvb 等格式将无法播放：', converter.ffmpegPath());
     }
   });
+  // 监听显示器热插拔与 DPI/分辨率变动，刷新 window-move 的工作区并集缓存
+  const clearDisplayCache = () => { cachedDisplayUnion = null; };
+  screen.on('display-added', clearDisplayCache);
+  screen.on('display-removed', clearDisplayCache);
+  screen.on('display-metrics-changed', clearDisplayCache);
+
   // 延后 3 秒再查更新：避免和启动期的 ffmpeg 探测/首帧渲染抢网络与主线程；
   // 只有发现新版本才会弹窗，没有更新或检查失败都保持安静。
   setTimeout(() => updater.checkForUpdates(mainWindow), 3000);
@@ -425,10 +449,6 @@ ipcMain.handle('media:prepare', async (event, filePath, force) => {
   const key = String(win.id);
   // 同一窗口切换到别的文件 → 作废它上一次的转换（运行时兜底的强制请求不走这里，避免打断自己）
   if (!tier) converter.invalidate(key);
-  // 先给界面一个即时反馈：转换可能要排队（全局并发 1），没有这条提示用户会以为"点了没反应"
-  if (!win.isDestroyed()) {
-    win.webContents.send('media:convert-progress', { percent: 0, tier: tier || 'auto', stage: 'prepare' });
-  }
 
   try {
     const result = await converter.prepare(abs, {
@@ -439,8 +459,8 @@ ipcMain.handle('media:prepare', async (event, filePath, force) => {
         win.webContents.send('media:convert-progress', {
           percent: p.percent,
           speed: p.speed,
-          // converter 探测出真实档位后会回传一次（含 'decided' 阶段），优先用它：
-          // 这样界面能显示"正在换容器"而不是笼统的"正在转换格式"
+          // converter 在需要探测/转换时依次回传 'prepare' 与 'decided'（含真实档位），
+          // 原生快通与缓存命中不再闪烁无意义的准备提示
           tier: p.tier || tier || 'auto',
           stage: p.stage
         });
@@ -485,14 +505,24 @@ ipcMain.handle('file:findCover', async (event, filePath) => {
     const dir = path.dirname(abs);
     const base = path.basename(abs, path.extname(abs));
     const candidates = COVER_FILENAMES.concat([base + '.jpg', base + '.jpeg', base + '.png', base + '.webp']);
+    // 一次目录读取代替最多 12 次串行 stat，并统一按小写名索引匹配（兼顾大小写变体）
+    const dirEntries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => null);
+    if (!dirEntries) return null;
+    const entryMap = new Map();
+    for (const entry of dirEntries) {
+      if (entry.isFile() || entry.isSymbolicLink()) {
+        entryMap.set(entry.name.toLowerCase(), entry.name);
+      }
+    }
     for (const name of candidates) {
-      const p = path.join(dir, name);
+      const actualName = entryMap.get(name.toLowerCase());
+      if (!actualName) continue;
+      const p = path.join(dir, actualName);
       let stat;
       try {
-        // 全部改异步：同步 stat/read 会阻塞主进程，多窗口下等于卡住所有窗口
         stat = await fs.promises.stat(p);
       } catch (err) {
-        continue; // 不存在或不可读，继续尝试下一个候选名
+        continue; // 不可读或失效符号链接，继续下一个候选
       }
       // 0 字节的坏图（下载失败/占位文件）必须跳过，否则它会把后面真正有效的候选封面顶掉
       if (!stat.isFile() || stat.size === 0) continue;
@@ -780,10 +810,22 @@ ipcMain.handle('resize-window-to-video', (event, payload) => {
       lockAspect = false;
     }
   }
+  // 过矮时以最小高度补偿；若补偿导致宽度超限（极端超宽视频），优先不溢出屏幕并解除比例锁
+  const minHeight = 320;
+  if (targetHeight < minHeight) {
+    targetHeight = minHeight;
+    targetWidth = Math.round(targetHeight * aspectRatio);
+    if (targetWidth > maxWidth) {
+      targetWidth = maxWidth;
+      lockAspect = false;
+    }
+  }
 
-  programmaticResizeWindows.add(win); // 程序化贴合尺寸：引发的 resize 不写进窗口状态记忆
   win.setAspectRatio(lockAspect ? aspectRatio : 0); // setAspectRatio(0) 取消锁定
-  win.setSize(targetWidth, targetHeight);
+  if (targetWidth !== currentBounds.width || targetHeight !== currentBounds.height) {
+    programmaticResizeTargets.set(win, { w: targetWidth, h: targetHeight }); // 只豁免本次目标尺寸触发的 resize
+    win.setSize(targetWidth, targetHeight);
+  }
 
   // 贴合后必须仍完整落在工作区内：窗口原本贴着屏幕右/下边缘时，放大后会被推出屏幕、画面被裁掉。
   // 这次挪动同样是程序化的，必须登记目标坐标，让 move 事件跳过保存（否则会把贴合尺寸写进记忆）。
@@ -798,6 +840,21 @@ ipcMain.handle('resize-window-to-video', (event, payload) => {
   return true;
 });
 
+// 缓存全部显示器工作区并集，避免 window-move 拖拽高频期每帧枚举屏幕
+let cachedDisplayUnion = null;
+function getDisplayUnion() {
+  if (!cachedDisplayUnion) {
+    const displays = screen.getAllDisplays().map(d => d.workArea);
+    cachedDisplayUnion = {
+      left: Math.min(...displays.map(d => d.x)),
+      top: Math.min(...displays.map(d => d.y)),
+      right: Math.max(...displays.map(d => d.x + d.width)),
+      bottom: Math.max(...displays.map(d => d.y + d.height))
+    };
+  }
+  return cachedDisplayUnion;
+}
+
 // 处理渲染进程发送的动态移动窗口请求（约束在全部显示器并集内，避免拖出屏幕无法找回）
 ipcMain.on('window-move', (event, payload) => {
   if (!isTrustedSender(event)) return;
@@ -810,11 +867,7 @@ ipcMain.on('window-move', (event, payload) => {
   if (win.isFullScreen()) return; // 全屏状态下禁止拖动窗口
 
   const bounds = win.getBounds();
-  const displays = screen.getAllDisplays().map(d => d.workArea);
-  const left = Math.min(...displays.map(d => d.x));
-  const top = Math.min(...displays.map(d => d.y));
-  const right = Math.max(...displays.map(d => d.x + d.width));
-  const bottom = Math.max(...displays.map(d => d.y + d.height));
+  const { left, top, right, bottom } = getDisplayUnion();
   // 允许跨屏自由拖动，但窗口至少保留 40px 可抓取区域在所有屏幕并集内
   const nx = Math.min(Math.max(x, left - bounds.width + 40), right - 40);
   const ny = Math.min(Math.max(y, top), bottom - 40);

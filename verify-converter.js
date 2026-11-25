@@ -365,6 +365,19 @@ if (!fs.existsSync(ffmpegPath)) {
           `被换掉的旧任务必须作废退出，实际 ${oldResult}（'completed' = 白转了整个长片）`);
         passed++;
         console.log(`[通过] 换片作废：旧任务已取消，新片 ${elapsed}ms 返回（未被旧任务堵住）`);
+
+        // 非原生 !force 缓存前置直出：切到不存在的 ffmpegPath 后再次请求 shortAvi，必须直接命中缓存、跳过探测且不发 prepare 阶段
+        converter.configure({ ffmpegPath: path.join(os.tmpdir(), 'bb-nonexistent-ffmpeg.exe') });
+        const cacheEvents = [];
+        const cachedFresh = await converter.prepare(shortAvi, {
+          key: 'switch-cache-hit',
+          onProgress: (p) => cacheEvents.push(p)
+        });
+        assert.strictEqual(cachedFresh.cached, true, '非原生普通打开命中已有缓存时必须直接返回 cached: true');
+        assert.ok(cacheEvents.every(p => p.stage !== 'prepare'),
+          '非原生普通打开命中缓存时不得触发 stage: "prepare" 或启动 ffmpeg');
+        passed++;
+        console.log('[通过] 非原生二次缓存直出：跳过 ffmpeg 检测与探测，零 prepare 阶段直返产物');
       } else {
         console.log('[跳过] 换片作废验证：自带样本生成失败');
       }
@@ -372,7 +385,7 @@ if (!fs.existsSync(ffmpegPath)) {
       console.error('[失败] 换片作废验证异常: ' + (e && e.message));
       process.exit(1);
     } finally {
-      converter.configure({ cacheDir: prevCache });
+      converter.configure({ ffmpegPath, cacheDir: prevCache });
     }
 
     // ============ 第二层 B：真实样本对账（可选，需 BB_SAMPLES 指向样本目录）============

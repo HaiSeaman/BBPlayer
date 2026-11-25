@@ -6,7 +6,7 @@
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6+-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)
-![Version](https://img.shields.io/badge/Version-1.10.0-ff3b4e?style=for-the-badge)
+![Version](https://img.shields.io/badge/Version-1.10.1-ff3b4e?style=for-the-badge)
 
 **A pure, lightweight, high-polish borderless media player for Windows**
 
@@ -131,7 +131,7 @@ npm start
 
 ```bash
 npm install        # install dev dependencies (electron + electron-builder only)
-npm run verify     # consistency check: shared extension lists ↔ package.json file associations
+npm run verify     # run 4 headless checks (25 extensions / 36 converter / 51 renderer / wiring & security)
 npm run build      # produce installer + portable exe into release-dist/
 ```
 
@@ -163,7 +163,8 @@ BBPlayer/
 
 **Design principles**
 - **Zero runtime dependencies** — only `electron` and `electron-builder` as devDependencies.
-- **Single-file renderer** — one `renderer.js` (~2,760 lines) per window, fully isolated state.
+- **Single-file renderer** — one `renderer.js` (~2,800 lines) per window, fully isolated state.
+- **Low-overhead & async discipline** — zero-reflow animations (`translateX` / `scaleY`), playlist `content-visibility`, 8s idle `AudioContext` auto-suspend, direct disk-cache hit skipping FFmpeg probe, and async main-process file I/O.
 - **Hardened IPC** — every handler validates the sender against a trusted-window set (`isTrustedSender`); navigation, `window.open`, and non-top-level frames are blocked.
 - **Extension single source** — media/subtitle extension lists live in shared modules consumed by both processes via IPC, auto-checked by `npm run verify`.
 

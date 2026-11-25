@@ -1319,6 +1319,80 @@ async function playlistIncrementalRenderTest() {
   assert.strictEqual(nodeC, nodeC2, '追加后第 3 条的 DOM 节点必须原样保留（不得重建）');
 }
 
+// 21) 同名字幕并行探测按优先级选用，且显隐同步 .hidden 类
+async function subtitleParallelPriorityTest() {
+  const VTT_TEXT = 'WEBVTT\n\n00:00:01.000 --> 00:00:03.000\n并行命中VTT\n';
+  const env = loadRenderer({
+    readTextFile: (p) => (p.endsWith('.vtt') ? VTT_TEXT : null)
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  callFn(env, `currentFilePath = 'D:\\\\v\\\\clip.mp4'; manualSubtitleFor = null;`);
+  await callFn(env, "checkAndAutoLoadSubtitles('D:\\\\v\\\\clip')");
+  const reads = env.ipcCalls.filter(c => c[0] === 'readTextFile').map(c => c[1]);
+  assert.strictEqual(reads.length, 4, `应并发发起全部 4 个字幕后缀探测，实际 ${reads.length}`);
+  callFn(env, 'renderSubtitlesAt(1.5)');
+  assert.strictEqual(readVar(env, 'customSubtitle.textContent'), '并行命中VTT', '应按优先级命中 .vtt 字幕');
+  assert.strictEqual(callFn(env, "customSubtitle.classList.contains('hidden')"), false, '显示字幕后必须移除 .hidden 类');
+  callFn(env, 'renderSubtitlesAt(5.0)');
+  assert.strictEqual(callFn(env, "customSubtitle.classList.contains('hidden')"), true, '字幕结束后必须恢复 .hidden 类');
+}
+
+// 22) 历史视图事件委托：条目仅带 historyPath、不带 index；点击删除原地移除且更新计数
+function historyDelegationAndDeleteTest() {
+  const env = loadRenderer();
+  callFn(env, `
+    localStorage.setItem('bb_player_history', JSON.stringify({
+      'D:/v/one.mp4': { t: 10, ts: 200 },
+      'D:/v/two.mp4': { t: 20, ts: 100 }
+    }));
+    playlistView = 'history';
+    renderHistoryView();
+  `);
+  assert.strictEqual(callFn(env, 'playlistItemsContainer.children.length'), 2, '历史视图应渲染 2 个条目');
+  assert.strictEqual(callFn(env, 'playlistItemsContainer.children[0].dataset.historyPath'), 'D:/v/one.mp4');
+  assert.strictEqual(callFn(env, 'playlistItemsContainer.children[0].dataset.index'), undefined, '历史条目禁止设置 dataset.index');
+
+  callFn(env, `{
+    const first = playlistItemsContainer.children[0];
+    const rmBtn = first.querySelector('.remove-btn');
+    playlistItemsContainer.dispatch('click', { target: rmBtn });
+  }`);
+  assert.strictEqual(callFn(env, 'playlistItemsContainer.children.length'), 1, '删除首条后应就地移除仅剩 1 条');
+  assert.strictEqual(callFn(env, 'playlistCountEl.textContent'), '1 条历史');
+
+  callFn(env, `{
+    const last = playlistItemsContainer.children[0];
+    const rmBtn = last.querySelector('.remove-btn');
+    playlistItemsContainer.dispatch('click', { target: rmBtn });
+  }`);
+  assert.strictEqual(callFn(env, 'playlistCountEl.textContent'), '0 条历史');
+  assert.ok(callFn(env, 'playlistItemsContainer.innerHTML').includes('暂无观看历史'), '删空后应展示空占位');
+}
+
+// 23) restoreSettings 非法数值校验 + resetPlayerToEmpty 完整复位
+function settingsAndResetSanityTest() {
+  const env = buildEnv();
+  env.sandbox.localStorage.setItem('bb_player_settings', '{"subtitleOffset":1e309,"subtitleFontSize":1e309}');
+  env.context = vm.createContext(env.sandbox);
+  vm.runInContext(RENDERER_SRC, env.context, { filename: 'renderer.js' });
+  assert.strictEqual(readVar(env, 'subtitleOffset'), 0, '非有限字幕偏移必须被丢弃');
+  assert.strictEqual(readVar(env, 'currentSubtitleFontSize'), 22, '非有限字幕字号必须被丢弃');
+
+  callFn(env, `
+    videoTitleEl.textContent = '旧视频.mp4';
+    currentTimeEl.textContent = '01:23';
+    durationEl.textContent = '04:56';
+    if (titleBar) titleBar.classList.add('hide');
+    resetPlayerToEmpty();
+  `);
+  assert.strictEqual(callFn(env, 'videoTitleEl.textContent'), 'BBPlayer', '清空播放器后标题应复原');
+  assert.strictEqual(callFn(env, 'currentTimeEl.textContent'), '00:00', '清空播放器后当前时间应归零');
+  assert.strictEqual(callFn(env, 'durationEl.textContent'), '00:00', '清空播放器后总时长应归零');
+  assert.strictEqual(callFn(env, "titleBar.classList.contains('hide')"), false, '清空播放器后标题栏不得保持隐藏');
+  assert.strictEqual(callFn(env, "customSubtitle.classList.contains('hidden')"), true, '清空播放器后字幕必须带 .hidden');
+}
+
 // ============ 主流程 ============
 
 (async () => {
@@ -1327,6 +1401,9 @@ async function playlistIncrementalRenderTest() {
   await audioExtTest();
   await okAsync('字幕解析：真实世界的写法（VTT 位置参数 / 点分隔 / CRLF / BOM / ASS 大小写与逗号）', subtitleParseTest);
   await okAsync('菜单手动加载字幕不被"手动优先"标记误拦', subtitleTest);
+  await okAsync('同名字幕并行探测与 .hidden 显隐同步', subtitleParallelPriorityTest);
+  ok('历史视图事件委托与原地删除（含删空占位）', historyDelegationAndDeleteTest);
+  ok('字幕设置非有限数防御与清空播放器全状态复位', settingsAndResetSanityTest);
   await playlistTest();
   await okAsync('播放失败熔断：全部失败即停止自动跳集，单循环不跳集，换片解除单条拉黑', failureFallbackTest);
   await okAsync('纯音频音乐模式判定与误判自愈', musicAndDurationTest);

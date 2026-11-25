@@ -29,10 +29,18 @@ function isNewer(remote, current) {
   return false;
 }
 
-// 便携版取免安装包（BBPlayer.1.9.2.exe），安装版取 Setup；取不到返回 null 由调用方兜底
+function isSafeHttpsUrl(url) {
+  try {
+    return new URL(String(url || '')).protocol === 'https:';
+  } catch (_) {
+    return false;
+  }
+}
+
+// 便携版取免安装包（BBPlayer.1.9.2.exe / BBPlayer-1.9.2.exe），安装版取 Setup；取不到返回 null 由调用方兜底
 function pickAsset(assets, portable) {
   const list = Array.isArray(assets) ? assets : [];
-  const re = portable ? /^BBPlayer\.[\d.]+\.exe$/i : /Setup.*\.exe$/i;
+  const re = portable ? /^BBPlayer[-._ ]?v?[\d.]+\.exe$/i : /Setup.*\.exe$/i;
   return list.find((a) => a && typeof a.name === 'string' && re.test(a.name) && a.browser_download_url) || null;
 }
 
@@ -48,6 +56,7 @@ async function fetchLatestRelease() {
 // 超时保护：连接半开时 fetch 会一直挂着，进度条停在原地且整个流程永不返回。
 // 30 分钟兜底（约 57KB/s 也能下完 100MB），只防死连接、不误伤慢速网络。
 async function downloadFile(url, dest, onProgress) {
+  if (!isSafeHttpsUrl(url)) throw new Error('不安全的下载地址');
   const { net } = require('electron');
   const res = await net.fetch(url, {
     headers: REQUEST_HEADERS,
@@ -94,7 +103,7 @@ async function checkForUpdates(win) {
     const asset = pickAsset(release.assets, !!portableFile);
     if (!asset) {
       // 发布方式变了（找不到对应安装包）时退回发布页，至少让用户能自己下载
-      shell.openExternal(release.html_url);
+      if (isSafeHttpsUrl(release.html_url)) shell.openExternal(release.html_url);
       return;
     }
 
@@ -103,17 +112,29 @@ async function checkForUpdates(win) {
     // asset.name 来自网络，取 basename 防止被构造成 ../ 之类的路径
     const dest = path.join(portableFile ? path.dirname(portableFile) : app.getPath('temp'),
       path.basename(asset.name));
-    const setProgress = (v) => { if (win && !win.isDestroyed()) win.setProgressBar(v); };
+    const part = dest + '.part';
+    let lastProgressAt = 0;
+    const setProgress = (v) => {
+      if (!win || win.isDestroyed()) return;
+      const now = Date.now();
+      // 完成/清除/开始不节流；下载中按 120ms 节流避免每个网络分片刷一次任务栏原生 API
+      if (v > 0 && v < 1 && now - lastProgressAt < 120) return;
+      lastProgressAt = now;
+      win.setProgressBar(v);
+    };
     try {
       setProgress(2); // 先显示不确定进度（总大小要等响应头才知道）
-      const received = await downloadFile(asset.browser_download_url, dest, (p) => setProgress(p > 0 ? p : 2));
+      const received = await downloadFile(asset.browser_download_url, part, (p) => setProgress(p > 0 ? p : 2));
       // 发布信息里有大小就核对一次，防止代理/断流写出一个能启动但残缺的安装包
       if (asset.size && received !== asset.size) throw new Error('安装包大小与发布信息不一致');
+      await fs.promises.rename(part, dest);
     } catch (e) {
       setProgress(-1);
-      try { fs.unlinkSync(dest); } catch (_) { /* 清理残留失败可忽略 */ }
-      dialog.showErrorBox('更新下载失败',
-        `安装包下载失败：${e.message}\n\n可手动前往 ${release.html_url} 下载最新版本。`);
+      await fs.promises.unlink(part).catch(() => { /* 清理残留失败可忽略 */ });
+      const manualHint = isSafeHttpsUrl(release.html_url)
+        ? `\n\n可手动前往 ${release.html_url} 下载最新版本。`
+        : '';
+      dialog.showErrorBox('更新下载失败', `安装包下载失败：${e.message}${manualHint}`);
       return;
     }
     setProgress(-1);
@@ -147,4 +168,4 @@ async function checkForUpdates(win) {
   }
 }
 
-module.exports = { checkForUpdates, isNewer, pickAsset };
+module.exports = { checkForUpdates, isNewer, pickAsset, isSafeHttpsUrl };

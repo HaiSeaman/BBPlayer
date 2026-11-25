@@ -50,6 +50,10 @@ let config = {
 };
 
 function configure(next) {
+  if (next && next.ffmpegPath && next.ffmpegPath !== config.ffmpegPath) {
+    versionOk = null;
+    encoderCache = null;
+  }
   config = Object.assign({}, config, next);
 }
 
@@ -158,35 +162,45 @@ function progressPercent(outTimeSec, totalSec) {
 // ============ ffmpeg 调用 ============
 
 let versionOk = null;
+let availablePending = null;
 // 异步探测（绝不用 spawnSync：那是同步阻塞，会把整个主进程的 IPC 与窗口按钮一起卡住最多 10 秒）
 async function isAvailable() {
   if (versionOk === true) return true;
-  if (!fs.existsSync(config.ffmpegPath)) return false;   // 文件不存在是稳定事实；其它失败不缓存，免得瞬时失败被永久钉成"不可用"
-  const ok = await new Promise((resolve) => {
-    let done = false;
-    let child = null;
-    let timer = null;
-    const fin = (v) => {
-      if (done) return;
-      done = true;
-      if (timer) clearTimeout(timer);
-      if (child) children.delete(child);
-      resolve(v);
-    };
-    try {
-      child = spawn(config.ffmpegPath, ['-hide_banner', '-version'], { windowsHide: true });
-    } catch (e) {
-      return fin(false);
-    }
-    children.add(child);
-    let out = '';
-    child.stdout.on('data', (d) => { out += d.toString(); });
-    child.on('error', () => fin(false));
-    child.on('close', (code) => fin(code === 0 && /ffmpeg version/i.test(out)));
-    timer = setTimeout(() => { try { child.kill(); } catch (e) {} fin(false); }, 10000);
-  });
-  if (ok) versionOk = true;
-  return ok;
+  if (availablePending) return availablePending;
+  availablePending = (async () => {
+    const exists = await fsp.access(config.ffmpegPath).then(() => true, () => false);
+    if (!exists) return false;   // 文件不存在是稳定事实；其它失败不缓存，免得瞬时失败被永久钉成"不可用"
+    const ok = await new Promise((resolve) => {
+      let done = false;
+      let child = null;
+      let timer = null;
+      const fin = (v) => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        if (child) children.delete(child);
+        resolve(v);
+      };
+      try {
+        child = spawn(config.ffmpegPath, ['-hide_banner', '-version'], { windowsHide: true });
+      } catch (e) {
+        return fin(false);
+      }
+      children.add(child);
+      let out = '';
+      child.stdout.on('data', (d) => { if (out.length < 32768) out += d.toString(); });
+      child.on('error', () => fin(false));
+      child.on('close', (code) => fin(code === 0 && /ffmpeg version/i.test(out)));
+      timer = setTimeout(() => { try { child.kill(); } catch (e) {} fin(false); }, 10000);
+    });
+    if (ok) versionOk = true;
+    return ok;
+  })();
+  try {
+    return await availablePending;
+  } finally {
+    availablePending = null;
+  }
 }
 
 const PROBE_ARGS = (file) => ['-hide_banner', '-nostdin', '-i', file];
@@ -217,8 +231,12 @@ function releaseProbeSlot() {
 }
 
 // 异步探测：`ffmpeg -i 文件` 无输出目标时必然以非零码退出，这是预期行为
-async function probeFile(file) {
+async function probeFile(file, key, expectedGen) {
   await acquireProbeSlot();
+  if (key && expectedGen !== undefined && expectedGen !== generationOf(key)) {
+    releaseProbeSlot();
+    return null;
+  }
   return new Promise((resolve) => {
     let stderr = '';
     let finished = false;
@@ -228,7 +246,14 @@ async function probeFile(file) {
       if (finished) return;
       finished = true;
       if (timer) clearTimeout(timer);
-      if (child) children.delete(child);
+      if (child) {
+        children.delete(child);
+        if (key && activeProbes.has(key)) {
+          const s = activeProbes.get(key);
+          s.delete(child);
+          if (s.size === 0) activeProbes.delete(key);
+        }
+      }
       releaseProbeSlot();
       resolve(p);
     };
@@ -238,6 +263,11 @@ async function probeFile(file) {
       return done(null);
     }
     children.add(child);
+    if (key) {
+      let s = activeProbes.get(key);
+      if (!s) { s = new Set(); activeProbes.set(key, s); }
+      s.add(child);
+    }
     timer = setTimeout(() => { try { child.kill(); } catch (e) {} done(null); }, 20000);
     child.stderr.on('data', (d) => { if (stderr.length < 200000) stderr += d.toString(); });
     child.on('error', () => done(null));
@@ -249,6 +279,7 @@ async function probeFile(file) {
 
 let chain = Promise.resolve();
 const generations = new Map();   // key → 代号；号一变，该 key 的旧任务全部作废
+const activeProbes = new Map();  // key → Set<ChildProcess>，换片时连同在途探测一并中止
 let activeChild = null;
 let activeKey = null;
 // 所有在跑的子进程（含探测进程）：关窗/退出时必须一个不剩地杀掉，否则会留下吃 CPU 的幽灵 ffmpeg
@@ -268,6 +299,12 @@ function invalidate(key) {
   generations.set(key, generationOf(key) + 1);
   if (activeChild && activeKey === key) {
     try { activeChild.kill(); } catch (e) { /* 已退出 */ }
+  }
+  const probes = activeProbes.get(key);
+  if (probes) {
+    for (const p of probes) {
+      try { p.kill(); } catch (e) { /* 已退出 */ }
+    }
   }
 }
 
@@ -376,17 +413,27 @@ function runFfmpegOnce(args, key, durationSec, onProgress) {
       if (activeChild === child) { activeChild = null; activeKey = null; }
       fn();
     };
-    child.stdout.on('data', (d) => {
-      lastActivity = Date.now();
-      stdoutBuf += d.toString();
-      const lines = stdoutBuf.split(/\r?\n/);
-      stdoutBuf = lines.pop();
-      const p = parseProgress(lines.join('\n'));
+    let progressLines = [];
+    const flushProgressBlock = () => {
+      if (progressLines.length === 0) return;
+      const p = parseProgress(progressLines.join('\n'));
+      progressLines = [];
       if (p && Number.isFinite(p.totalSize) && p.totalSize > config.maxOutputBytes) {
         tooLarge = true;
         try { child.kill(); } catch (e) { /* 已退出 */ }
       }
       if (p && onProgress) onProgress({ percent: progressPercent(p.outTimeSec, durationSec), speed: p.speed });
+    };
+    child.stdout.on('data', (d) => {
+      lastActivity = Date.now();
+      stdoutBuf += d.toString();
+      const lines = stdoutBuf.split(/\r?\n/);
+      stdoutBuf = lines.pop();
+      for (const line of lines) {
+        if (!line) continue;
+        progressLines.push(line);
+        if (/^progress=/i.test(line)) flushProgressBlock();
+      }
     });
     child.stderr.on('data', (d) => {
       lastActivity = Date.now();
@@ -395,6 +442,8 @@ function runFfmpegOnce(args, key, durationSec, onProgress) {
     });
     child.on('error', (e) => finish(() => reject(e)));
     child.on('close', (code, signal) => {
+      if (stdoutBuf) { progressLines.push(stdoutBuf); stdoutBuf = ''; }
+      flushProgressBlock();
       finish(() => {
         // 体积超限先判：超限时是我们主动 kill，close 回调为 code=null/signal=SIGTERM（实测），
         // 会与"用户主动取消"撞在一起；不先判就被当成取消静默吞掉，用户看不到"产物超限"这个真因。
@@ -460,40 +509,49 @@ async function convertWithRetry(input, out, tier, probe, key, onProgress, encode
 // 本机可用的编码器集合（探测一次并缓存）。
 // 用 spawn 而不是 spawnSync：同步版会把主进程（含所有窗口的 IPC 与按钮）卡住最多 15 秒。
 let encoderCache = null;
+let encodersPending = null;
 async function availableEncoders() {
   if (encoderCache && encoderCache.size > 0) return encoderCache;
-  const set = new Set();
-  await new Promise((resolve) => {
-    let done = false;
-    let child = null;
-    let timer = null;
-    const fin = () => {
-      if (done) return;
-      done = true;
-      if (timer) clearTimeout(timer);
-      if (child) children.delete(child);
-      resolve();
-    };
-    try {
-      child = spawn(config.ffmpegPath, ['-hide_banner', '-encoders'], { windowsHide: true });
-    } catch (e) {
-      return fin();
-    }
-    children.add(child);
-    let out = '';
-    child.stdout.on('data', (d) => { out += d.toString(); });
-    child.on('error', () => fin());
-    child.on('close', () => {
-      for (const line of out.split(/\r?\n/)) {
-        const m = /^\s*[VAS][\w.]{5}\s+(\S+)/.exec(line);
-        if (m) set.add(m[1]);
+  if (encodersPending) return encodersPending;
+  encodersPending = (async () => {
+    const set = new Set();
+    await new Promise((resolve) => {
+      let done = false;
+      let child = null;
+      let timer = null;
+      const fin = () => {
+        if (done) return;
+        done = true;
+        if (timer) clearTimeout(timer);
+        if (child) children.delete(child);
+        resolve();
+      };
+      try {
+        child = spawn(config.ffmpegPath, ['-hide_banner', '-encoders'], { windowsHide: true });
+      } catch (e) {
+        return fin();
       }
-      fin();
+      children.add(child);
+      let out = '';
+      child.stdout.on('data', (d) => { if (out.length < 200000) out += d.toString(); });
+      child.on('error', () => fin());
+      child.on('close', () => {
+        for (const line of out.split(/\r?\n/)) {
+          const m = /^\s*[VAS][\w.]{5}\s+(\S+)/.exec(line);
+          if (m) set.add(m[1]);
+        }
+        fin();
+      });
+      timer = setTimeout(() => { try { child.kill(); } catch (e) {} fin(); }, 15000);
     });
-    timer = setTimeout(() => { try { child.kill(); } catch (e) {} fin(); }, 15000);
-  });
-  if (set.size > 0) encoderCache = set;   // 只在探测成功时缓存
-  return set;
+    if (set.size > 0) encoderCache = set;   // 只在探测成功时缓存
+    return set;
+  })();
+  try {
+    return await encodersPending;
+  } finally {
+    encodersPending = null;
+  }
 }
 
 // 产物体积估算（只为"磁盘够不够"这一道预检服务）。
@@ -575,6 +633,22 @@ async function prepare(inputPath, opts = {}) {
     return { url: directUrl, tier: 'native', converted: false };
   }
 
+  // 非原生扩展名若已有完整缓存产物，直接复用（跳过 isAvailable 与 probeFile 外部进程开销）
+  if (!force) {
+    for (const t of ['transcode', 'audiofix', 'remux']) {
+      const cached = path.join(config.cacheDir, cacheFileName(inputPath, stat.size, stat.mtimeMs, t));
+      if (await existsNonEmpty(cached)) {
+        markUsed(cached);
+        return { url: pathToFileURL(cached).href, tier: t, converted: true, cached: true };
+      }
+    }
+  }
+
+  // 确定要探测或转换，先发准备提示让界面响应用户点击，原生与命中缓存绝不误发
+  if (onProgress) {
+    try { onProgress({ percent: 0, tier: force || 'auto', stage: 'prepare' }); } catch (e) { /* 回调异常不影响转换 */ }
+  }
+
   // 走到这里就一定需要探测/转换 → 先确认转换器真的能用，给出明确原因，
   // 而不是让内核去报"系统无法解码该文件"（打包漏带 ffmpeg 时用户根本查不出原因）。
   if (!(await isAvailable())) {
@@ -583,17 +657,11 @@ async function prepare(inputPath, opts = {}) {
   if (myGen !== generationOf(key)) throw makeCancelledError();   // 上面两次 await 期间可能已换片
 
   // 运行时兜底可以直接指定档位（探测说能播、实际黑屏/无声时用）
-  const probe = await probeFile(inputPath);
+  const probe = await probeFile(inputPath, key, myGen);
   // 探测是最慢的一步（起一个 ffmpeg 解析头部）。用户换片时若已作废，立刻退出，
   // 绝不进入后面的转换——这是"换片不堵队列"的关键闸口。
   if (myGen !== generationOf(key)) throw makeCancelledError();
   const tier = force || decideTier(probe);
-  // 探测一结束就把**判定出来的档位**回报一次：界面据此显示"正在换容器/正在转换音频/
-  // 正在重新编码"，而不是笼统的"正在转换格式"（remux 与 transcode 的体感差别极大，
-  // 用户需要一眼看出这次要不要等）。返回的对象里也带 tier，供调用方兜底。
-  if (onProgress) {
-    try { onProgress({ percent: 0, tier, stage: 'decided' }); } catch (e) { /* 回调异常不影响转换 */ }
-  }
   if (tier === 'native') {
     return { url: directUrl, tier, converted: false };
   }
@@ -602,10 +670,14 @@ async function prepare(inputPath, opts = {}) {
   // 强制档位意味着"现有产物播不出来"：必须绕过缓存重转一次，否则命中同一个废产物，兜底等于空转
   if (force) {
     try { await fsp.unlink(outPath); } catch (e) { /* 还没有产物 */ }
-  }
-  if (await existsNonEmpty(outPath)) {
+  } else if (await existsNonEmpty(outPath)) {
     markUsed(outPath);
     return { url: pathToFileURL(outPath).href, tier, converted: true, cached: true };
+  }
+
+  // 确认要进转换队列时才把判定档位汇报一次，避免直接播/命缓存白闪烁进度提示
+  if (onProgress) {
+    try { onProgress({ percent: 0, tier, stage: 'decided' }); } catch (e) { /* 回调异常不影响转换 */ }
   }
 
   return enqueue(async () => {
@@ -626,18 +698,17 @@ async function prepare(inputPath, opts = {}) {
     // 写成 "xxx.mp4.part" 会直接报 "Error opening output files: Invalid argument"（实测踩过）。
     const part = outPath.replace(/\.mp4$/, '.part.mp4');
     try { await fsp.unlink(part); } catch (e) { /* 不存在 */ }
-    activeParts.add(part);   // 登记：cleanup 扫描时必须跳过这个正在写入的半截产物
-    let converted = false;
+    activeParts.add(part);   // 登记：cleanup 扫描时必须跳过，直至原子改名彻底落地或失败删除
+    let renamed = false;
     try {
       await convertWithRetry(inputPath, part, tier, probe, key, onProgress, encoders);
-      converted = true;
+      if (myGen !== generationOf(key)) throw makeCancelledError();
+      await fsp.rename(part, outPath);   // 原子改名：播放端永远看不到半截文件
+      renamed = true;
     } finally {
-      // 失败或取消都要清掉半截产物：否则 GB 级碎片会一直堆在临时目录里（只有重启才清）
-      if (!converted) { try { await fsp.unlink(part); } catch (e) { /* 没产出 */ } }
-      activeParts.delete(part);   // 无论成败都注销：之后它要么已改名（不再存在），要么已删除
+      if (!renamed) { try { await fsp.unlink(part); } catch (e) { /* 没产出 */ } }
+      activeParts.delete(part);
     }
-    if (myGen !== generationOf(key)) { try { await fsp.unlink(part); } catch (e) {} throw makeCancelledError(); }
-    await fsp.rename(part, outPath);   // 原子改名：播放端永远看不到半截文件
     markUsed(outPath);                  // 记录使用时间（缓存淘汰按它排，不用 Windows 上失效的 atime）
     cleanup();                          // 顺手清一次缓存（内部节流到每分钟最多一次）
     return { url: pathToFileURL(outPath).href, tier, converted: true };
@@ -652,25 +723,31 @@ async function cleanup(force) {
   lastCleanupAt = now;
   try {
     const dir = config.cacheDir;
-    if (!fs.existsSync(dir)) return;
-    const entries = await fsp.readdir(dir);
+    const entries = await fsp.readdir(dir).catch(() => null);
+    if (!entries) return;
     let files = [];
     let total = 0;
-    for (const name of entries) {
-      const p = path.join(dir, name);
-      const st = await fsp.stat(p).catch(() => null);
-      if (!st || !st.isFile()) continue;
-      if (/\.part\.mp4$/.test(name)) {
-        // 跳过正在写入的半截产物（见 activeParts）：删它会让正在跑的 ffmpeg 写向已删除路径而失败
-        if (!activeParts.has(p)) await fsp.unlink(p).catch(() => {});
-        continue;
+    const batchSize = 16;
+    for (let i = 0; i < entries.length; i += batchSize) {
+      const stats = await Promise.all(entries.slice(i, i + batchSize).map(async (name) => {
+        const p = path.join(dir, name);
+        const st = await fsp.stat(p).catch(() => null);
+        return { name, p, st };
+      }));
+      for (const { name, p, st } of stats) {
+        if (!st || !st.isFile()) continue;
+        if (/\.part\.mp4$/.test(name)) {
+          // 跳过正在写入的半截产物（见 activeParts）：删它会让正在跑的 ffmpeg 写向已删除路径而失败
+          if (!activeParts.has(p)) await fsp.unlink(p).catch(() => {});
+          continue;
+        }
+        // 排序依据：优先用"本次进程内最后一次被 prepare 命中"的时间（可靠、跨平台一致），
+        // 没有记录（软件刚重启）才退回文件 mtime。
+        // 绝不用 atime：Windows NTFS 默认不更新它（实测读文件后完全不变），
+        // 会退化成"按创建时间淘汰"——天天看的老剧先被删，还可能删掉正在播的产物。
+        files.push({ p, size: st.size, used: lastUsedAt.get(p) || st.mtimeMs });
+        total += st.size;
       }
-      // 排序依据：优先用"本次进程内最后一次被 prepare 命中"的时间（可靠、跨平台一致），
-      // 没有记录（软件刚重启）才退回文件 mtime。
-      // 绝不用 atime：Windows NTFS 默认不更新它（实测读文件后完全不变），
-      // 会退化成"按创建时间淘汰"——天天看的老剧先被删，还可能删掉正在播的产物。
-      files.push({ p, size: st.size, used: lastUsedAt.get(p) || st.mtimeMs });
-      total += st.size;
     }
     if (total <= config.maxCacheBytes) return;
     files.sort((a, b) => a.used - b.used);

@@ -11,7 +11,7 @@
 BBPlayer/
 ├── main.js                 # Electron 主进程：多窗口工厂/状态记忆、IPC 信任面、文件对话框、目录扫描、媒体兼容层接线
 ├── preload.js              # 预加载脚本：contextBridge 暴露 electronAPI（渲染进程唯一系统入口）
-├── renderer.js             # 渲染层全部业务逻辑（约 2760 行，单文件策略，每窗口一份独立实例）
+├── renderer.js             # 渲染层全部业务逻辑（约 2800 行，单文件策略，每窗口一份独立实例）
 ├── converter.js            # 媒体兼容层：探测 + 三档转换（换容器/换音频/重编码）+ 缓存 + 并发队列（v1.8.0 新增）
 ├── updater.js              # 启动时静默检查 GitHub Release，有新版本才弹窗并下载安装包（v1.10.0 新增）
 ├── index.html              # 界面结构 + 全部内联 CSS（"安静玻璃"低占用视觉 + 彩虹品牌体系 + 音乐播放效果层）
@@ -111,6 +111,10 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 另外，字幕文案缓存 `lastRenderedSubText` 原先只在"无字幕可显示"时才清空，换片时未重置 →
 新片首句若与上一部末句同文，会被判为"无需重绘"而漏显；现已在换片与清空播放器时一并重置。
 
+**v1.10.1 优化**：同名字幕自动探测 `checkAndAutoLoadSubtitles()` 改为 `Promise.all` 并发检查同目录
+4 种扩展名后再按既定顺序取首个命中，缩短带外挂字幕视频的加载延迟；`#custom-subtitle-text` 显隐
+统一改用 `.hidden` CSS 类（移除内联 `style="display: none;"`）。
+
 ### 5. IPC 安全面（v1.4.4 起为多窗口信任面）
 
 所有主进程 IPC 处理器经 `isTrustedSender()` 校验发送方：
@@ -119,12 +123,12 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
   集合在 `createPlayerWindow()` 创建时加入、`closed` 时移除；发送窗口由 `windowOf(event)`
   （`BrowserWindow.fromWebContents(event.sender)`）定位。
 - 字幕读取有扩展名白名单 + 10MB 上限；`will-navigate` 与 `window-open` 已封死；
-- 新窗口播放入口 `window:openInNewWindow` 校验扩展名白名单 + `fs.existsSync`。
+- 新窗口播放入口 `window:openInNewWindow` 校验扩展名白名单 + `fs.existsSync`（运行中 `second-instance` 入口为异步 `fs.promises.access`）。
 
 **v1.7.0 加固**：
 - `file:findCover` 补扩展名白名单（入参必须是受支持的媒体文件）——此前入参不校验时，
-  该接口等价于"传任意图片路径即可读回其 base64"，是一条越权读图通道；同时把
-  `existsSync/statSync/readFileSync` 全部改为 `fs.promises`，避免同步磁盘读阻塞主进程；
+  该接口等价于"传任意图片路径即可读回其 base64"，是一条越权读图通道；并改为异步
+  `fs.promises.readdir` 一次扫描目录建立小写索引（替代多次串行 `stat`/`readFileSync`）；
 - `dialog:saveScreenshot` 新增载荷上限 `MAX_SCREENSHOT_BYTES`（64MB），拒绝异常/恶意超大载荷；
 - 新增 `MAX_PLAYER_WINDOWS`（16）限制同时在世的播放器窗口数，防止注入后循环开窗耗尽资源；
 - 主进程新增 `process.on('uncaughtException'/'unhandledRejection')` 兜底：任何一处 IPC 回调
@@ -133,8 +137,12 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 
 ### 6. 持久化键（localStorage）
 
-- `bb_player_history`：播放进度（上限 `HISTORY_MAX`=200 条，写入时裁剪）；
-- `bb_player_settings`：音量/倍速/字幕样式偏移/播放模式。
+- `bb_player_history`：播放进度（上限 `HISTORY_MAX`=200 条，仅在超出上限时才排序裁剪）；
+  历史视图采用 `playlistItemsContainer` 单一点击委托（以 `dataset.historyPath` 区分于列表的 `dataset.index`），
+  删除单条时就地移出对应 DOM 节点并更新计数，不再按条绑定闭包监听器或整表重建；
+- `bb_player_settings`：音量/倍速/字幕样式偏移/播放模式（滑块拖动 `input` 与滚轮调音走
+  `schedulePersistSettings()` 250ms 防抖写盘并在 `beforeunload` 兜底刷盘；`restoreSettings()` 对字幕偏移
+  与字号校验 `Number.isFinite`，拦截 `Infinity` / `NaN` 损坏存档）。
 
 ### 7. 内存管理要点
 
@@ -195,6 +203,9 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 因此这段窗口期内会出现"UI 显示 150%、实际 100%"的短暂过渡。
 `enterMusicMode()` 另有一次保底初始化，确保频谱所需的 `analyserNode` 必然存在。
 
+**v1.10.1 变更——闲置自动挂起**：新增 `audioCtxIdleTimer`，暂停 8 秒后若仍处于暂停状态则自动执行
+`audioCtx.suspend()` 释放音频线程与硬件占用（`resetPlayerToEmpty()` 时立即挂起），恢复播放时立刻清定时器并唤醒。
+
 ### 11. 多窗口架构（v1.4.4 新增）
 
 **目标**：多个视频在各自独立窗口同时播放（类似 PotPlayer/VLC 多开），每个窗口都是完整播放器。
@@ -248,7 +259,9 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
   界面被音乐效果层盖住（字幕/截图按钮被隐藏）且此后没有纠正机会 →
   新增 `loadeddata` 复检，一旦发现有画面立即 `exitMusicMode()`；
 - **频谱采样缓冲复用**：`drawSpectrumFrame` 原先每帧 `new Uint8Array(frequencyBinCount)`，
-  改为复用 `spectrumBins`（仅在桶数变化时重建），消除音乐播放期间每秒约 60 次的短命分配。
+  改为复用 `spectrumBins`（仅在桶数变化时重建），消除音乐播放期间每秒约 60 次的短命分配；
+- **v1.10.1 进一步降负**：`applyCoverGlow()` 复用模块级 24×24 `coverGlowCanvas` 离屏画布，
+  切歌不再重复创建 canvas；`setupSpectrumCanvas()` 在缓冲物理尺寸未变化时跳过重置。
 
 ### 13. 窗口关闭与退出策略（v1.5.0 曾为托盘常驻，现已改为关闭即退出）
 
@@ -265,9 +278,12 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
    （`backgroundThrottling: false` 保证后台不卡顿）。
 4. **second-instance 唤起**：运行中再次双击 exe（无文件参数）时 `showMainWindow()` 恢复/前置主窗口。
 5. **窗口状态**：仅主窗口持久化窗口状态；落盘使用 `win.getNormalBounds()`（最大化时取恢复后边界）
-   + `maximized` 标志，启动时恢复最大化，避免"伪最大化"占满工作区；程序化自动贴合
-   （`resize-window-to-video` 的 setSize）经 `programmaticResizeWindows`（WeakSet）标记后不再触发
-   状态记忆，避免覆盖用户手调尺寸。
+   + `maximized` 标志，启动时恢复最大化，避免"伪最大化"占满工作区；平时防抖保存走异步
+   `fs.promises.writeFile`（`writeWindowState(false)`），仅关闭窗口前同步刷盘保底（`writeWindowState(true)`）；
+   程序化自动贴合（`resize-window-to-video` 的 `setSize`/`setPosition`）分别经 `programmaticResizeTargets`
+   与 `programmaticMoveTargets`（WeakMap 记录目标坐标/尺寸，在 ±2px 误差内一次性消费，最大化/还原时清零）
+   精准豁免，不再用固定时间窗吞掉紧随其后的用户手动拖拽；竖屏窗口增设 `minHeight = 320` 兜底保护，
+   多显示器合并区域新增 `cachedDisplayUnion` 懒缓存（仅显示器插拔或指标变更时失效）。
 
 ---
 
@@ -352,6 +368,11 @@ UTF-8/UTF-16LE/UTF-16BE BOM 识别 → UTF-8 `fatal:true` 严格解码（非法�
 11. **变量清理**：删除闲置的 `--panel-glass` / `--ctrl-bg` / `--ctrl-border` /
     `--ctrl-hover-border` / `--ctrl-text` / `--ctrl-hover` / `--menu-bg` / `--tooltip-bg` /
     `--accent-glow` / `--titlebar-icon-shadow` 共 10 组。
+12. **v1.10.1 零回流与变量收口**：`#playlist-panel` 改为固定 `right: 0` + `transform: translateX(100% → 0)`
+    纯 GPU 合成滑入；`#progress-container` 固定 12px 命中热区、悬停改为 `scaleY(1.8)` 放大（零 Layout Reflow）；
+    `.playlist-item` 启用 `content-visibility: auto; contain-intrinsic-size: 36px;` 加速长列表渲染；
+    将字幕阴影、Logo 内阴影、弹层/提示框阴影、频谱渐变色带与危险文字色全数收口到主题 CSS 变量，
+    并清理 `#empty-state` 内联重复 SVG 属性。
 
 ### 17. 播放列表"正在播放"指示与轻量高亮路径（v1.6.0）
 
@@ -488,17 +509,20 @@ AC3 / EAC3 / DTS（高清片源"有画面没声音"的元凶）。
    而队列并发是 1，会永久堵死整个转换层）；探测进程限流 2 个并发（渲染端一旦循环调用不会拉起几百个 ffmpeg）；
    所有子进程登记在册，关窗/退出统一杀干净。
 10. **缓存的两条语义**（容易搞混，改代码前先看这条）：
-    - 普通打开：命中缓存直接用（第二次打开秒开）。
+    - 普通打开（`!force`）：原生扩展名查强制档缓存、非原生扩展名同样在 `isAvailable`/`probeFile` 之前先查
+      `['transcode', 'audiofix', 'remux']` 磁盘缓存，命中即直出（第二次打开直接免探测秒开）。
     - **强制档位（`force`）= 运行时兜底**：说明现有产物播不出来，**必须绕过缓存重转一次**，否则命中同一个废产物、兜底等于空转。
-    - 反过来，原生扩展名的文件（mkv/mp4 装 AC3/DTS、mp4 装 Xvid）在普通打开时会先查"有没有它的强制档产物"，
-      有就直接复用——否则第二次打开又会静音/黑屏，而"每文件一次"的兜底已被挡掉，用户只能重启。
 11. **磁盘预检按产物估算**，不是按源文件体积：换容器/换音频 ≈ 源大小+300MB；重编码按 `目标码率×时长×1.5`。
     曾经用"源×1.5"估，结果 20GB 的 VOB 被要求 30GB 空间（实际产物 1~2GB），明明能转却被拒。
 12. **安全**：`spawn` 传参数组（不拼 shell 命令）、`windowsHide`、输入路径过扩展名白名单 + 存在性校验、
     输出路径由主进程自己拼、磁盘空间预检、单文件产物体积有上限。
+13. **v1.10.1 并发去重与全异步化**：`isAvailable()` / `availableEncoders()` 增加在途 Promise 去重与 stdout 上限截断；
+    换片取消 `invalidate(key)` 可同步强杀 `activeProbes` 中的在途探测进程；`runFfmpegOnce()` 按 `/^progress=/i`
+    帧边界累计块解析进度防止报文跨 chunk 截断；`activeParts.delete(part)` 移到 `rename` 外层 `finally`
+    防止并发清理误删；`cleanup()` 改全异步 16 并发 `fsp.stat`；`configure()` 换 `ffmpegPath` 时清空探测缓存。
 
 **验证**：`npm run verify` 会跑 `verify-exts.js`（扩展名三层对账：原生 8 + 需转换 11 + 音频 6 = 25）
-与 `verify-converter.js`（判定规则单测 + 真实样本对账 + 真实转换冒烟 + 缓存命中）。
+与 `verify-converter.js`（判定规则单测 + 真实样本对账 + 真实转换冒烟 + 缓存命中共 36 项）。
 设 `BB_SAMPLES` 指向样本目录即可启用"真实样本"部分：
 
 ```powershell
@@ -555,16 +579,17 @@ npm run verify
 1. 拉最新 Release 取 `tag_name`，与 `app.getVersion()` 做**数字段比较**（`1.9.10 > 1.9.9`，忽略 `v` 前缀）；
 2. 不新于当前版本 → 直接返回，**不弹任何窗**；断网/限流/解析失败同样静默（只写 console）；
 3. 有新版本 → 原生对话框「确定更新 / 取消」，取消即结束；
-4. 选安装包：便携版（存在 `PORTABLE_EXECUTABLE_FILE`）取 `BBPlayer.<ver>.exe`，安装版取 `Setup` 包；
+4. 选安装包：便携版（存在 `PORTABLE_EXECUTABLE_FILE`）取 `BBPlayer.<ver>.exe`（兼容 `BBPlayer-v1.x.exe` 等命名），安装版取 `Setup` 包；
    找不到对应资源就退回浏览器打开发布页；
-5. 流式下载（不整包进内存），任务栏图标显示进度，30 分钟超时兜底，并用 Release 里的 `size` 校验完整性；
+5. 流式下载到 `.part` 临时文件（不整包进内存），任务栏图标显示进度（120ms 节流），30 分钟超时兜底，并用 Release 里的 `size` 校验完整性后再原子改名为正式文件；
 6. 收尾：
    - **便携版**必须 `app.relaunch({ execPath })` 再退出——直接 spawn 新 exe 会撞上本进程的单实例锁，
      新实例秒退（症状是"更新完毫无反应"）；新版下载到旧文件旁边，旧 exe 由用户自行删除；
    - **安装版**启动 Setup 后退出。Windows 上 `spawn` 无效 exe 会**同步抛错**，必须 try/catch；
      启动失败要留在软件里报错，不能"退出又没装上"。
 
-**边界与安全**：下载地址只来自固定仓库的 Release；文件名取 `path.basename` 防目录穿越；只接受 HTTPS；
+**边界与安全**：下载地址只来自固定仓库的 Release；文件名取 `path.basename` 防目录穿越；`downloadFile` 与
+`shell.openExternal` 均前置 `isSafeHttpsUrl` 仅接受 HTTPS 协议；
 不做数字签名校验（已知风险：仓库账号被盗时可能下发恶意安装包，靠主人保管好 GitHub 账号）。
 
 **测试**：`verify-wiring.js` 用真值表锁住版本比较与安装包选择，并静态盯住三件事——
@@ -573,6 +598,68 @@ npm run verify
 ---
 
 ## 三、版本变更明细
+
+### v1.10.1——全量性能与内存优化 + 异步 I/O 重构 + 安全边界与回归基建加固
+
+> 本节记录 v1.10.1 相对 v1.10.0 的实际改动。**无存储格式变化**，覆盖安装即可，
+> 设置 / 播放列表 / 观看历史全部保留。
+
+#### A. 性能、内存与渲染帧率优化
+
+- **非原生老格式免探测秒开**（`converter.js`）：`prepare()` 对非原生文件在 `!force` 模式下，
+  未启动 `isAvailable()` 与 `probeFile()` 前即直扫 `['transcode', 'audiofix', 'remux']` 磁盘缓存；
+  命中即提前至 `stage: 'decided'` 前直接返回（`tier === 'native'` 同理），避免启动 FFmpeg 进程及界面瞬闪。
+- **零回流 UI 与长列表虚拟化**（`index.html`）：
+  - `#playlist-panel` 改为固定 `right: 0` + `transform: translateX(100% → 0)` 纯 GPU 合成滑入；
+  - `#progress-container` 固定 12px 命中热区，悬停通过 `scaleY(1.8)` 放大，消除高度变更引发的 Layout Reflow；
+  - `.playlist-item` 启用 `content-visibility: auto; contain-intrinsic-size: 36px;`，跳过长列表可视区外排版计算；
+  - 字幕阴影、Logo 内阴影、弹层/提示框阴影、频谱色带、危险文字色收口至 `:root` 与浅色主题变量，清理 `#empty-state` 内联重复 SVG 属性。
+- **音频功耗与图形对象复用**（`renderer.js`）：
+  - 新增 `audioCtxIdleTimer`：暂停 8 秒后仍暂停则 `audioCtx.suspend()` 释放硬件音频线程（`resetPlayerToEmpty()` 立即挂起，播发时瞬间 `resume()`）；
+  - `applyCoverGlow()` 复用模块级 24×24 `coverGlowCanvas`，切歌不再重复分配 canvas；
+  - `setupSpectrumCanvas()` 在缓冲区物理尺寸未变时跳过重置。
+- **并发字幕探测与渲染路径减负**（`renderer.js`）：
+  - `checkAndAutoLoadSubtitles()` 改用 `Promise.all` 并发检测同目录 4 种字幕后缀并按优先级取首条命中；
+  - `renderHistoryView()` 移除逐条绑定的海量闭包监听，统一并入 `playlistItemsContainer` 事件委托（通过 `dataset.historyPath` 区分，绝不混用 `dataset.index`），删除单条历史时就地删节点并同步刷新计数与空状态；
+  - 滑块 `input` 与滚轮调音走 `schedulePersistSettings()` 250ms 防抖落盘（`beforeunload` 兜底刷新）；
+  - `saveHistoryEntry()` 仅在条目超 `HISTORY_MAX`（200）时才排序裁剪；
+  - `mediaExtOf()` 提前至 `isAudioExt` 上方统一复用；`removePlaylistItem()` 删除正在播放且有后续条目时直接 `return` 避免双倍重建列表 DOM。
+
+#### B. 异步 I/O 与进程调度优化
+
+- **主进程全面消减同步阻塞**（`main.js`）：
+  - `file:findCover` 改为单次异步 `fs.promises.readdir({ withFileTypes: true })` 建立小写映射表，替代原先最多 12 次串行 `stat`；
+  - 运行中 `second-instance` 与路径检查统一走异步 `resolveMediaPath()`，消除运行时 `fs.existsSync`；
+  - `writeWindowState(sync = false)` 平时防抖保存改为异步 `fs.promises.writeFile`，仅关窗时同步保底；
+  - 多显示器总边界新增 `cachedDisplayUnion` 懒缓存，仅显示器插拔或指标变化时重置失效。
+- **转换层并发去重与异步清理**（`converter.js`）：
+  - `isAvailable()` 与 `availableEncoders()` 增加 `availablePending` / `encodersPending` 并发去重及 stdout 上限截断（32KB / 200KB）；
+  - `probeFile` 接入 `activeProbes`，`invalidate(key)` 换片取消可同步强杀在途探测进程；
+  - `cleanup()` 移除 `fs.existsSync`，改用 16 并发异步批处理 `fsp.stat`。
+- **更新器流式清理与节流**（`updater.js`）：取消阻塞式 `unlinkSync`，下载失败后异步清理 `.part` 文件并异步 `rename`；`setProgressBar` 增加 120ms 节流。
+
+#### C. 逻辑缺陷修复与边界防护
+
+- **程序化窗口调整精准豁免**（`main.js`）：`programmaticResizeTargets` 与 `programmaticMoveTargets`（WeakMap）记录目标尺寸/坐标并在 ±2px 内一次性消费（最大化/还原清零），不再用固定时间窗误吞用户手动调整；竖屏计算增加 `minHeight = 320` 保护。
+- **FFmpeg 进度帧边界解析与缓存保护**（`converter.js`）：`runFfmpegOnce()` 按 `/^progress=/i` 边界累计块统一解析，解决跨 chunk 截断导致的进度漏报；`prepare()` 仅在真实进入探测后才发 `stage: 'prepare'`；`activeParts.delete(part)` 移到 `rename` 外层 `finally`；`configure()` 更换 `ffmpegPath` 时清空探测缓存。
+- **渲染端状态与数值鲁棒性**（`index.html`、`renderer.js`）：
+  - `#custom-subtitle-text` 改用 `.hidden` CSS 类（替代内联 `style="display: none;"`），全链统一同步；
+  - `restoreSettings()` 对字幕偏移/字号校验 `Number.isFinite()`，防止 `Infinity` / `NaN` 损坏存档；
+  - `resetPlayerToEmpty()` 补齐清理 `titlebarIdleTimer`、移除标题栏 `hide`、恢复标题为 `BBPlayer`、时间归 `00:00` 与 `--progress` 归 `0%`；
+  - 拖放过滤新增 `isValidDropFile(f)` 拦截 0 字节及无扩展名文件夹。
+
+#### D. 安全边界加固
+
+- **更新器 HTTPS 协议白名单**（`updater.js`）：新增并导出 `isSafeHttpsUrl(url)`，在 `downloadFile` 与 `shell.openExternal` 调用前均强制校验证明仅允许 `https:` 协议；便携版资产正则放宽为 `/^BBPlayer[-._ ]?v?[\d.]+\.exe$/i`。
+
+#### E. 测试与防退化基建增强
+
+- `verify-converter.js`（35 → **36 项**）：新增非原生文件二次打开直接命中磁盘缓存免探测直出断言；
+- `verify-renderer.js`（48 → **51 项**）：新增历史视图委托点击/就地删除、损坏存档 `Infinity` 拦截、并发同名字幕加载 3 大类回归锁；
+- `verify-wiring.js`：新增**第 10 节架构与防退化契约**，静态与动态守护 HTTPS 校验、`.part` 异步清理、零回流 CSS、`content-visibility`、`AudioContext` 休眠、历史事件委托与非必要同步 `writeFileSync` 防护；
+- `npm run verify` 全部通过，全仓 JS 语法检查无误。
+
+---
 
 ### v1.10.0——窄窗口 UI 自适应 + 启动自动检查更新 + 全量审查修复
 

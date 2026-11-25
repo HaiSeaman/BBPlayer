@@ -153,7 +153,12 @@ assert.deepStrictEqual(missingRefs, [], `index.html 引用了不存在的文件:
   ];
   assert.strictEqual(updater.pickAsset(assets, true).browser_download_url, 'portable', '便携版应下载免安装包');
   assert.strictEqual(updater.pickAsset(assets, false).browser_download_url, 'setup', '安装版应下载 Setup');
+  assert.strictEqual(updater.pickAsset([{ name: 'BBPlayer-v1.10.0.exe', browser_download_url: 'p2' }], true).browser_download_url, 'p2', '便携版应兼容连字符命名');
   assert.strictEqual(updater.pickAsset([], true), null, '找不到安装包要返回 null（由调用方退回发布页）');
+  assert.strictEqual(updater.isSafeHttpsUrl('https://github.com/a/b'), true, 'https URL 应放行');
+  assert.strictEqual(updater.isSafeHttpsUrl('http://github.com/a/b'), false, 'http 非加密 URL 必须拒绝');
+  assert.strictEqual(updater.isSafeHttpsUrl('javascript:alert(1)'), false, '危险伪协议必须拒绝');
+  assert.strictEqual(updater.isSafeHttpsUrl(''), false, '空 URL 必须拒绝');
   assert.ok(/updater\.checkForUpdates\(mainWindow\)/.test(mainSrc),
     'main.js 启动流程必须真的调用 updater.checkForUpdates(mainWindow)');
   // 便携版更新必须走 relaunch：直接 spawn 新 exe 会撞上本进程的单实例锁，新实例秒退（表现为“更新完没反应”）
@@ -163,10 +168,31 @@ assert.deepStrictEqual(missingRefs, [], `index.html 引用了不存在的文件:
   // 安装包文件名来自网络，必须取 basename 后再拼路径（防 ../ 目录穿越）
   assert.ok(/path\.basename\(asset\.name\)/.test(upSrc),
     '下载路径必须对 asset.name 取 basename（防路径穿越）');
+  assert.ok(/isSafeHttpsUrl/.test(upSrc) && /\.part/.test(upSrc) && /fs\.promises\.rename/.test(upSrc),
+    'updater 必须校验 https 下载边界并使用 .part 原子改名');
+  assert.ok(!/unlinkSync/.test(upSrc), 'updater 清理残留不得使用阻塞 unlinkSync');
+}
+
+// 10) 本次全局优化新增的关键防御、缓存与界面同步契约
+{
+  const convSrc = read('converter.js');
+  assert.ok(/programmaticResizeTargets/.test(mainSrc) && /cachedDisplayUnion/.test(mainSrc),
+    'main.js 必须保留精确缩放比对表 programmaticResizeTargets 与工作区缓存 cachedDisplayUnion');
+  assert.ok(!/existsSync\(/.test(mainSrc.slice(mainSrc.indexOf("ipcMain.handle('file:findCover'"), mainSrc.indexOf("ipcMain.handle('file:findCover'") + 1200)),
+    'file:findCover 不得回退为串行同步 existsSync 检查');
+  assert.ok(/availablePending/.test(convSrc) && /encodersPending/.test(convSrc) && /activeProbes/.test(convSrc),
+    'converter.js 必须保留并发检测去重与在途探测进程登记');
+  assert.ok(!/fs\.existsSync/.test(convSrc), 'converter.js cleanup/缓存检查不得使用阻塞 fs.existsSync');
+  assert.ok(/id="custom-subtitle-text"\s+class="hidden"/.test(htmlSrc) && /#custom-subtitle-text\.hidden/.test(htmlSrc),
+    'index.html 字幕占位节点必须使用 .hidden 类控制初态');
+  assert.ok(!/customSubtitle\.style\.display/.test(renSrc) && /customSubtitle\.classList/.test(renSrc),
+    'renderer.js 必须统一通过 classList(.hidden) 显隐字幕，不可再混写 style.display');
+  assert.ok(/transform:\s*translateX\(100%\)/.test(htmlSrc) && !/right:\s*-320px/.test(htmlSrc),
+    '播放列表抽屉必须使用 GPU 合成 transform 位移');
 }
 
 console.log(`[OK] 端到端接线对账通过：打包清单 ${REQUIRED_IN_PACKAGE.length} 个必需文件齐全；` +
   `renderer 调用的 ${called.size} 个 API 全部已暴露；` +
   `IPC 通道 ${invoked.size} 发/${listened.size} 收全部对得上；` +
   `HTML 引用 ${htmlRefs.length} 个本地资源均存在；` +
-  `窗口钳制/目录截断/控制栏收起关模糊/尺寸钳制无条件/快捷键范围/挪窗记忆/窗口上限/导出收敛 8 条防御性修复到位`);
+  `全部防御性修复与架构契约到位`);
